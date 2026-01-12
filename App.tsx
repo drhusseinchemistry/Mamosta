@@ -51,7 +51,9 @@ const App: React.FC = () => {
 
   // --- API Key Management ---
   const saveApiKey = () => {
-    localStorage.setItem('gemini_api_key', apiKey);
+    const cleanKey = apiKey.trim();
+    localStorage.setItem('gemini_api_key', cleanKey);
+    setApiKey(cleanKey);
     setShowApiModal(false);
   };
 
@@ -94,8 +96,8 @@ const App: React.FC = () => {
              if (text) {
                addTextToCanvas(text);
              }
-           } catch (error) {
-             alert("کێشەیەک ڕوویدا لە کاتی گۆڕینی دەنگ: " + error);
+           } catch (error: any) {
+             alert("کێشەیەک ڕوویدا:\n" + error.message);
            } finally {
              setEditorState(prev => ({...prev, isProcessing: false, statusMessage: null}));
            }
@@ -105,7 +107,7 @@ const App: React.FC = () => {
         setIsRecording(true);
       } catch (err) {
         console.error("Error accessing microphone:", err);
-        alert("ناتوانین دەستکاری مایک بکەین.");
+        alert("ناتوانین دەستکاری مایک بکەین. تکایە ڕێگە بدە بە بەکارهێنانی مایک.");
       }
     }
   };
@@ -132,13 +134,11 @@ const App: React.FC = () => {
       if (text) {
         // Option 1: Add to canvas
         addTextToCanvas(text);
-        // Option 2: Alert for copy (could be improved with a modal result)
-        // alert("OCR Result:\n" + text);
       } else {
         alert("هیچ نووسینێک نەدۆزرایەوە");
       }
-    } catch (error) {
-      alert("OCR Failed: " + error);
+    } catch (error: any) {
+      alert("OCR Failed:\n" + error.message);
     } finally {
       setEditorState(prev => ({...prev, isProcessing: false, statusMessage: null}));
     }
