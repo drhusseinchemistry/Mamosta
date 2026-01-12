@@ -179,7 +179,7 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col h-screen bg-secondary">
+    <div className="flex flex-col h-screen bg-dark">
       {/* Loading Overlay */}
       {editorState.isProcessing && (
         <div className="fixed inset-0 bg-black/80 z-[100] flex flex-col items-center justify-center text-white">
@@ -216,12 +216,12 @@ const App: React.FC = () => {
         )}
 
         {/* Main Canvas Area */}
-        <div className="flex-1 overflow-y-auto bg-gray-500/10 p-4 md:p-8 flex flex-col items-center">
+        <div className="flex-1 overflow-y-auto bg-black p-4 md:p-8 flex flex-col items-center">
             {pages.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-full text-gray-400">
-                    <div className="bg-surface p-8 rounded-2xl border border-gray-600 text-center shadow-2xl">
-                        <p className="text-2xl mb-4 font-bold">بەخێربێی بۆ دەستکاریکەری PDF</p>
-                        <p className="mb-6">تکایە فایلەکا PDF باربکە بۆ دەستپێکرن یان لاپەرەکێ سپی زێدەکەن</p>
+                <div className="flex flex-col items-center justify-center h-full text-gray-500">
+                    <div className="bg-surface p-8 rounded-2xl border border-gray-700 text-center shadow-2xl">
+                        <p className="text-2xl mb-4 font-bold text-gray-200">بەخێربێی بۆ دەستکاریکەری PDF</p>
+                        <p className="mb-6 text-gray-400">تکایە فایلەکا PDF باربکە بۆ دەستپێکرن یان لاپەرەکێ سپی زێدەکەن</p>
                          <div className="flex gap-4 justify-center">
                              <label className="px-6 py-3 bg-primary hover:bg-blue-600 text-white rounded-lg cursor-pointer transition-colors inline-block font-bold">
                                  بارکرنا PDF
@@ -229,7 +229,7 @@ const App: React.FC = () => {
                              </label>
                              <button 
                                 onClick={handleAddPage}
-                                className="px-6 py-3 bg-surface hover:bg-gray-600 border border-gray-500 text-white rounded-lg transition-colors font-bold"
+                                className="px-6 py-3 bg-surface hover:bg-gray-700 border border-gray-600 text-white rounded-lg transition-colors font-bold"
                              >
                                 لاپەرێ سپی
                              </button>
@@ -254,7 +254,7 @@ const App: React.FC = () => {
       </div>
       
       {/* Footer Info */}
-      <div className="bg-darker border-t border-gray-700 p-1 px-4 text-xs text-gray-500 flex justify-between">
+      <div className="bg-darker border-t border-gray-800 p-1 px-4 text-xs text-gray-600 flex justify-between">
          <span>Kurdish PDF Editor v2.0</span>
          <span>{pages.length} Pages Loaded</span>
       </div>
