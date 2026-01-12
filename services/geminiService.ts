@@ -1,9 +1,10 @@
 import { GoogleGenAI } from "@google/genai";
 
-const MODEL_NAME = "gemini-2.0-flash-exp"; 
+// Using standard 2.0 flash model which is currently very stable and fast
+const MODEL_NAME = "gemini-2.0-flash"; 
 
 export const transcribeAudio = async (apiKey: string, audioBlob: Blob): Promise<string> => {
-  if (!apiKey) throw new Error("API Key is missing");
+  if (!apiKey) throw new Error("تکایە سەرەتا API Key دابنێ");
 
   try {
     const ai = new GoogleGenAI({ apiKey });
@@ -31,19 +32,23 @@ export const transcribeAudio = async (apiKey: string, audioBlob: Blob): Promise<
 
     return response.text || "";
   } catch (error: any) {
-    console.error("STT Error:", error);
+    console.error("STT Error details:", error);
     let msg = error.message || "Unknown error";
+    
     if (msg.includes("403") || msg.includes("API key")) {
-      throw new Error("API Key هەڵەیە. تکایە دڵنیابەرەوە لە ڕێکخستنەکان.");
+      throw new Error("کۆدی API Key هەڵەیە یان ماوەی بەسەرچووە. تکایە دانەیەکی نوێ وەربگرە.");
     } else if (msg.includes("not found")) {
-      throw new Error(`مۆدێلی ${MODEL_NAME} نەدۆزرایەوە. تکایە دڵنیابە API Key ەکەت دەسەڵاتی هەیە.`);
+      throw new Error(`مۆدێلی ${MODEL_NAME} نەدۆزرایەوە. تکایە دڵنیابە لە نووسینی API Key.`);
+    } else if (msg.includes("fetch")) {
+      throw new Error("کێشەی ئینتەرنێت هەیە یان API Key ڕێگەپێدراو نییە.");
     }
-    throw new Error(msg);
+    
+    throw new Error("کێشەیەک ڕوویدا: " + msg);
   }
 };
 
 export const performOCR = async (apiKey: string, imageDataUrl: string): Promise<string> => {
-  if (!apiKey) throw new Error("API Key is missing");
+  if (!apiKey) throw new Error("تکایە سەرەتا API Key دابنێ");
 
   try {
     const ai = new GoogleGenAI({ apiKey });
@@ -68,14 +73,16 @@ export const performOCR = async (apiKey: string, imageDataUrl: string): Promise<
 
     return response.text || "";
   } catch (error: any) {
-    console.error("OCR Error:", error);
+    console.error("OCR Error details:", error);
     let msg = error.message || "Unknown error";
+    
     if (msg.includes("403") || msg.includes("API key")) {
-      throw new Error("API Key هەڵەیە. تکایە دڵنیابەرەوە لە ڕێکخستنەکان.");
+      throw new Error("کۆدی API Key هەڵەیە. تکایە دڵنیابەرەوە.");
     } else if (msg.includes("not found")) {
-      throw new Error(`مۆدێلی ${MODEL_NAME} نەدۆزرایەوە. تکایە دڵنیابە API Key ەکەت دەسەڵاتی هەیە.`);
+      throw new Error(`مۆدێلی ${MODEL_NAME} کار ناکات. تکایە API Key ەکەت نوێ بکەرەوە.`);
     }
-    throw new Error(msg);
+    
+    throw new Error("کێشەیەک ڕوویدا: " + msg);
   }
 };
 
