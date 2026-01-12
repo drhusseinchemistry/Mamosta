@@ -1,16 +1,17 @@
 import { GoogleGenAI } from "@google/genai";
 
-// Using standard 2.0 flash model which is currently very stable and fast
-const MODEL_NAME = "gemini-2.0-flash"; 
+// We use gemini-1.5-flash because it is currently the most stable model for public API keys.
+// gemini-2.0-flash often returns "Not Found" or requires special access.
+const MODEL_NAME = "gemini-1.5-flash"; 
 
 export const validateApiKey = async (apiKey: string): Promise<boolean> => {
   if (!apiKey) return false;
   try {
     const ai = new GoogleGenAI({ apiKey });
-    // Try a very simple generation to test the key
+    // Use a simple string prompt for validation to reduce complexity
     await ai.models.generateContent({
       model: MODEL_NAME,
-      contents: { parts: [{ text: "Hi" }] }
+      contents: "Test connection",
     });
     return true;
   } catch (e) {
@@ -91,8 +92,8 @@ const handleError = (error: any) => {
     if (msg.includes("403") || msg.includes("API key")) {
       throw new Error("کۆدی API Key هەڵەیە یان ماوەی بەسەرچووە.");
     } else if (msg.includes("not found")) {
-      throw new Error(`مۆدێلی ${MODEL_NAME} نەدۆزرایەوە.`);
-    } else if (msg.includes("fetch")) {
+      throw new Error(`مۆدێلی ${MODEL_NAME} نەدۆزرایەوە (پێویستە API Key چالاک بێت).`);
+    } else if (msg.includes("fetch") || msg.includes("network")) {
       throw new Error("کێشەی ئینتەرنێت هەیە.");
     }
     
