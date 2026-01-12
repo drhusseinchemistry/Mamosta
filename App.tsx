@@ -5,6 +5,13 @@ import PageEditor from './components/PageEditor';
 import { EditorState, PageData, ToolType } from './types';
 import { initializePDFJS, loadPDFDocument, renderPDFPageToDataURL } from './services/pdfService';
 
+// Declare jsPDF on window
+declare global {
+  interface Window {
+    jspdf: any;
+  }
+}
+
 const App: React.FC = () => {
   const [pages, setPages] = useState<PageData[]>([]);
   const [activePage, setActivePage] = useState<number>(1);
@@ -24,9 +31,6 @@ const App: React.FC = () => {
   // Initialize external libraries
   useEffect(() => {
     const loadLibs = async () => {
-       // In a real app with bundlers, these are imported. 
-       // For this snippet, we assume they are loaded from CDN in index.html
-       // But we need to ensure pdfjs worker is set
        initializePDFJS();
     };
     loadLibs();
@@ -103,7 +107,6 @@ const App: React.FC = () => {
 
   const handleToolChange = (tool: ToolType) => {
     setEditorState(prev => ({ ...prev, activeTool: tool }));
-    // If tool is eraser, we might handle it globally or per canvas logic
     if (tool === 'eraser') {
         const activeCanvas = canvasesRef.current[activePage];
         if (activeCanvas) {
@@ -113,7 +116,6 @@ const App: React.FC = () => {
                 activeCanvas.renderAll();
             }
         }
-        // Switch back to select after delete
         setEditorState(prev => ({ ...prev, activeTool: 'select' }));
     }
   };
@@ -130,18 +132,68 @@ const App: React.FC = () => {
     canvasesRef.current[pageNumber] = canvas;
   };
 
-  const handleExport = () => {
-      // In a full implementation, this would use pdf-lib to create a new PDF,
-      // embed the original pages, and then draw the fabric objects as SVG paths or images on top.
-      alert('Export functionality requires integration with pdf-lib to merge Canvas+PDF. (Placeholder)');
+  const handleExport = async () => {
+      if (!window.jspdf) {
+          alert("JSPDF library not loaded");
+          return;
+      }
+
+      setEditorState(prev => ({ ...prev, isProcessing: true, statusMessage: '...PDF تێتە دروستکرن' }));
+
+      try {
+          const { jsPDF } = window.jspdf;
+          // Create PDF based on first page dimensions, or default A4
+          const firstPage = pages[0];
+          const orientation = firstPage && firstPage.viewport.width > firstPage.viewport.height ? 'l' : 'p';
+          const format = firstPage ? [firstPage.viewport.width * 0.75, firstPage.viewport.height * 0.75] : 'a4'; // Approx conversion px to pt
+          
+          const doc = new jsPDF({
+              orientation: orientation,
+              unit: 'px',
+              format: [firstPage.viewport.width, firstPage.viewport.height]
+          });
+
+          // Remove the default empty page added by new jsPDF() if we are going to add pages manually
+          // but jsPDF starts with one page. We will fill it, then add more.
+
+          for (let i = 0; i < pages.length; i++) {
+              const page = pages[i];
+              const canvas = canvasesRef.current[page.pageNumber];
+              
+              if (!canvas) continue;
+
+              // Deselect everything before export to avoid selection handles in PDF
+              canvas.discardActiveObject();
+              canvas.renderAll();
+
+              // Get High Quality Image from Canvas
+              const dataURL = canvas.toDataURL({
+                  format: 'jpeg',
+                  quality: 0.8,
+                  multiplier: 1 // Increase for higher res
+              });
+
+              if (i > 0) {
+                  doc.addPage([page.viewport.width, page.viewport.height]);
+              }
+              
+              doc.addImage(dataURL, 'JPEG', 0, 0, page.viewport.width, page.viewport.height);
+          }
+
+          doc.save("edited-document.pdf");
+
+      } catch (e) {
+          console.error(e);
+          alert("Error exporting PDF");
+      } finally {
+          setEditorState(prev => ({ ...prev, isProcessing: false, statusMessage: null }));
+      }
   };
 
   const handleAddPage = () => {
-    // Standard A4 size in pixels (72 DPI approx)
     const width = 595;
     const height = 842;
 
-    // Create a white blank image
     const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
@@ -160,7 +212,6 @@ const App: React.FC = () => {
 
     setPages(prev => [...prev, newPage]);
     
-    // Scroll to the new page after a brief delay to allow rendering
     setTimeout(() => {
         scrollToPage(newPageNumber);
     }, 100);
@@ -170,16 +221,14 @@ const App: React.FC = () => {
       if(!confirm(`دڵنیای لە سڕینەوەی لاپەڕەی ${pageNumber}?`)) return;
       
       const newPages = pages.filter(p => p.pageNumber !== pageNumber);
-      // Renumber pages to keep sequence
       const reordered = newPages.map((p, idx) => ({...p, pageNumber: idx + 1}));
       
       setPages(reordered);
-      // Clean up canvas ref
       delete canvasesRef.current[pageNumber];
   };
 
   return (
-    <div className="flex flex-col h-screen bg-dark">
+    <div className="flex flex-col h-screen bg-neutral-900">
       {/* Loading Overlay */}
       {editorState.isProcessing && (
         <div className="fixed inset-0 bg-black/80 z-[100] flex flex-col items-center justify-center text-white">
@@ -188,6 +237,7 @@ const App: React.FC = () => {
         </div>
       )}
 
+      {/* Floating Toolbar */}
       <Toolbar 
         editorState={editorState}
         onToolChange={handleToolChange}
@@ -198,13 +248,13 @@ const App: React.FC = () => {
         onExport={handleExport}
         onSaveProject={() => alert('Project saved locally (Placeholder)')}
         onAddPage={handleAddPage}
-        canUndo={false} // Todo: Implement Undo Stack
+        canUndo={false} 
         canRedo={false}
         onUndo={() => {}}
         onRedo={() => {}}
       />
 
-      <div className="flex flex-1 overflow-hidden flex-col md:flex-row">
+      <div className="flex flex-1 overflow-hidden flex-col md:flex-row pt-24 md:pt-0">
         {/* Sidebar for Thumbnails */}
         {pages.length > 0 && (
           <Sidebar 
@@ -216,20 +266,20 @@ const App: React.FC = () => {
         )}
 
         {/* Main Canvas Area */}
-        <div className="flex-1 overflow-y-auto bg-black p-4 md:p-8 flex flex-col items-center">
+        <div className="flex-1 overflow-y-auto bg-neutral-900 p-4 md:p-8 flex flex-col items-center pb-32 md:pb-8">
             {pages.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-full text-gray-500">
-                    <div className="bg-surface p-8 rounded-2xl border border-gray-700 text-center shadow-2xl">
+                <div className="flex flex-col items-center justify-center h-full text-gray-500 mt-10 md:mt-0">
+                    <div className="bg-surface p-8 rounded-2xl border border-gray-700 text-center shadow-2xl max-w-md mx-4">
                         <p className="text-2xl mb-4 font-bold text-gray-200">بەخێربێی بۆ دەستکاریکەری PDF</p>
                         <p className="mb-6 text-gray-400">تکایە فایلەکا PDF باربکە بۆ دەستپێکرن یان لاپەرەکێ سپی زێدەکەن</p>
-                         <div className="flex gap-4 justify-center">
-                             <label className="px-6 py-3 bg-primary hover:bg-blue-600 text-white rounded-lg cursor-pointer transition-colors inline-block font-bold">
+                         <div className="flex flex-col sm:flex-row gap-4 justify-center">
+                             <label className="px-6 py-3 bg-primary hover:bg-blue-600 text-white rounded-lg cursor-pointer transition-colors inline-block font-bold shadow-lg shadow-blue-500/30">
                                  بارکرنا PDF
                                  <input type="file" accept=".pdf" className="hidden" onChange={handleFileUpload} />
                              </label>
                              <button 
                                 onClick={handleAddPage}
-                                className="px-6 py-3 bg-surface hover:bg-gray-700 border border-gray-600 text-white rounded-lg transition-colors font-bold"
+                                className="px-6 py-3 bg-surface hover:bg-gray-600 border border-gray-500 text-white rounded-lg transition-colors font-bold"
                              >
                                 لاپەرێ سپی
                              </button>
@@ -246,7 +296,7 @@ const App: React.FC = () => {
                         editorState={editorState}
                         isActive={activePage === page.pageNumber}
                         onCanvasReady={handleCanvasReady}
-                        onModified={() => { /* Handle undo stack push here */ }}
+                        onModified={() => {}}
                     />
                 ))
             )}
@@ -254,9 +304,9 @@ const App: React.FC = () => {
       </div>
       
       {/* Footer Info */}
-      <div className="bg-darker border-t border-gray-800 p-1 px-4 text-xs text-gray-600 flex justify-between">
-         <span>Kurdish PDF Editor v2.0</span>
-         <span>{pages.length} Pages Loaded</span>
+      <div className="bg-black/90 border-t border-gray-800 p-1 px-4 text-xs text-gray-600 flex justify-between z-40 relative">
+         <span>Kurdish PDF Editor v2.1</span>
+         <span>{pages.length} Pages</span>
       </div>
     </div>
   );
