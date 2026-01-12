@@ -15,10 +15,11 @@ export interface PageData {
   image: string; // Base64 rendered image of the PDF page
 }
 
-// Global window extension for PDFJS
+// Global window extension for libraries
 declare global {
   interface Window {
     pdfjsLib: any;
     fabric: any;
+    jspdf: any;
   }
 }

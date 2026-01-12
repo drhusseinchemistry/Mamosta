@@ -7,13 +7,6 @@ import { initializePDFJS, loadPDFDocument, renderPDFPageToDataURL } from './serv
 import { transcribeAudio, performOCR, validateApiKey } from './services/geminiService';
 import { Icons } from './components/Icon';
 
-// Declare jsPDF on window
-declare global {
-  interface Window {
-    jspdf: any;
-  }
-}
-
 const App: React.FC = () => {
   const [pages, setPages] = useState<PageData[]>([]);
   const [activePage, setActivePage] = useState<number>(1);
@@ -52,9 +45,7 @@ const App: React.FC = () => {
     const savedKey = localStorage.getItem('gemini_api_key');
     if (savedKey) {
       setApiKey(savedKey);
-      // Optional: Auto-validate on load, but maybe better to just set it to connected if it exists to save quotas
-      // We will assume it's connected if loaded, or let user re-validate if it fails.
-      setApiStatus('idle'); 
+      setApiStatus('connected'); // Assume connected if key exists locally
     }
   }, []);
 
@@ -73,7 +64,7 @@ const App: React.FC = () => {
         localStorage.setItem('gemini_api_key', cleanKey);
         setApiKey(cleanKey);
         setApiStatus('connected');
-        // Auto close after 1 second of success
+        // Auto close after 1.5 second of success
         setTimeout(() => setShowApiModal(false), 1500);
     } else {
         setApiStatus('error');
