@@ -4,7 +4,7 @@ import Sidebar from './components/Sidebar';
 import PageEditor from './components/PageEditor';
 import { EditorState, PageData, ToolType } from './types';
 import { initializePDFJS, loadPDFDocument, renderPDFPageToDataURL } from './services/pdfService';
-import { transcribeAudio, performOCR } from './services/geminiService';
+import { transcribeAudio, performOCR, validateApiKey } from './services/geminiService';
 import { Icons } from './components/Icon';
 
 // Declare jsPDF on window
@@ -28,10 +28,14 @@ const App: React.FC = () => {
 
   // AI & Settings State
   const [apiKey, setApiKey] = useState<string>('');
+  const [apiStatus, setApiStatus] = useState<'idle' | 'validating' | 'connected' | 'error'>('idle');
   const [showApiModal, setShowApiModal] = useState<boolean>(false);
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  
+  // Hidden inputs refs
+  const ocrInputRef = useRef<HTMLInputElement>(null);
 
   // Store fabric canvas instances
   const canvasesRef = useRef<{[key: number]: any}>({});
@@ -46,15 +50,34 @@ const App: React.FC = () => {
     
     // Load API Key from local storage
     const savedKey = localStorage.getItem('gemini_api_key');
-    if (savedKey) setApiKey(savedKey);
+    if (savedKey) {
+      setApiKey(savedKey);
+      // Optional: Auto-validate on load, but maybe better to just set it to connected if it exists to save quotas
+      // We will assume it's connected if loaded, or let user re-validate if it fails.
+      setApiStatus('idle'); 
+    }
   }, []);
 
   // --- API Key Management ---
-  const saveApiKey = () => {
+  const saveApiKey = async () => {
     const cleanKey = apiKey.trim();
-    localStorage.setItem('gemini_api_key', cleanKey);
-    setApiKey(cleanKey);
-    setShowApiModal(false);
+    if (!cleanKey) {
+       setApiStatus('error');
+       return;
+    }
+    
+    setApiStatus('validating');
+    const isValid = await validateApiKey(cleanKey);
+    
+    if (isValid) {
+        localStorage.setItem('gemini_api_key', cleanKey);
+        setApiKey(cleanKey);
+        setApiStatus('connected');
+        // Auto close after 1 second of success
+        setTimeout(() => setShowApiModal(false), 1500);
+    } else {
+        setApiStatus('error');
+    }
   };
 
   // --- Audio Recording (STT) ---
@@ -112,36 +135,54 @@ const App: React.FC = () => {
     }
   };
 
-  // --- OCR Logic ---
-  const handleRunOCR = async () => {
+  // --- OCR Logic (File Based) ---
+  const handleRunOCRClick = () => {
     if (!apiKey) {
       alert("تکایە سەرەتا API Key زیاد بکە لە ڕێکخستنەکان");
       setShowApiModal(true);
       return;
     }
+    // Open File Dialog immediately
+    ocrInputRef.current?.click();
+  };
 
-    const activeCanvas = canvasesRef.current[activePage];
-    if (!activeCanvas) return;
+  const handleOcrFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
 
-    setEditorState(prev => ({...prev, isProcessing: true, statusMessage: '...OCR پشکنینی وێنە'}));
-
-    try {
-      // Get image data from current canvas view (ignoring current selection to get full context or bg)
-      // Usually better to just send the background image or the whole rendered canvas
-      const dataUrl = activeCanvas.toDataURL({ format: 'jpeg', quality: 0.8 });
+      setEditorState(prev => ({...prev, isProcessing: true, statusMessage: '...OCR (وێنە/PDF) شیکردنەوەی'}));
       
-      const text = await performOCR(apiKey, dataUrl);
-      if (text) {
-        // Option 1: Add to canvas
-        addTextToCanvas(text);
-      } else {
-        alert("هیچ نووسینێک نەدۆزرایەوە");
+      try {
+        let imageDataUrl = '';
+
+        if (file.type === 'application/pdf') {
+             // Handle PDF: Render first page to image
+             const pdfDoc = await loadPDFDocument(file);
+             const { dataUrl } = await renderPDFPageToDataURL(pdfDoc, 1, 1.5); // 1.5 scale for better OCR
+             imageDataUrl = dataUrl;
+        } else {
+             // Handle Image
+             imageDataUrl = await new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onload = (evt) => resolve(evt.target?.result as string);
+                reader.readAsDataURL(file);
+             });
+        }
+
+        const text = await performOCR(apiKey, imageDataUrl);
+        if (text) {
+             addTextToCanvas(text);
+        } else {
+             alert("هیچ نووسینێک نەدۆزرایەوە");
+        }
+
+      } catch (error: any) {
+          console.error(error);
+          alert("OCR Failed: " + error.message);
+      } finally {
+          setEditorState(prev => ({...prev, isProcessing: false, statusMessage: null}));
+          e.target.value = ''; // Reset input
       }
-    } catch (error: any) {
-      alert("OCR Failed:\n" + error.message);
-    } finally {
-      setEditorState(prev => ({...prev, isProcessing: false, statusMessage: null}));
-    }
   };
 
   // Helper to add text to canvas
@@ -151,7 +192,7 @@ const App: React.FC = () => {
       const iText = new window.fabric.IText(text, {
         left: 50,
         top: 50,
-        fontSize: 20,
+        fontSize: 18,
         fill: editorState.strokeColor,
         fontFamily: 'Noto Sans Arabic',
         direction: 'rtl',
@@ -161,7 +202,7 @@ const App: React.FC = () => {
       activeCanvas.add(iText);
       activeCanvas.setActiveObject(iText);
       activeCanvas.renderAll();
-      setEditorState(prev => ({...prev, activeTool: 'select'})); // Switch to select to edit text
+      setEditorState(prev => ({...prev, activeTool: 'select'})); 
     }
   };
 
@@ -208,7 +249,6 @@ const App: React.FC = () => {
       const activeCanvas = canvasesRef.current[activePage];
       if (activeCanvas && typeof data === 'string') {
         window.fabric.Image.fromURL(data, (img: any) => {
-            // Scale image if it's too large relative to the canvas
             const maxDimension = 300;
             let scale = 1;
             if (img.width > maxDimension || img.height > maxDimension) {
@@ -226,13 +266,12 @@ const App: React.FC = () => {
             activeCanvas.setActiveObject(img);
             activeCanvas.renderAll();
             
-            // Switch to select tool so user can move/resize the image immediately
             setEditorState(prev => ({ ...prev, activeTool: 'select' }));
         });
       }
     };
     reader.readAsDataURL(file);
-    e.target.value = ''; // Reset input
+    e.target.value = ''; 
   };
 
   const handleToolChange = (tool: ToolType) => {
@@ -352,6 +391,15 @@ const App: React.FC = () => {
 
   return (
     <div className="flex flex-col h-screen bg-neutral-900">
+      {/* Hidden Input for OCR */}
+      <input 
+        type="file" 
+        ref={ocrInputRef}
+        onChange={handleOcrFileChange}
+        accept="image/*,application/pdf"
+        className="hidden"
+      />
+
       {/* Loading Overlay */}
       {editorState.isProcessing && (
         <div className="fixed inset-0 bg-black/80 z-[100] flex flex-col items-center justify-center text-white">
@@ -375,13 +423,31 @@ const App: React.FC = () => {
             <input 
               type="password" 
               value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
+              onChange={(e) => {
+                 setApiKey(e.target.value);
+                 setApiStatus('idle'); // Reset status on edit
+              }}
               placeholder="Paste Gemini API Key here..."
-              className="w-full bg-darker border border-gray-600 rounded-lg p-3 text-white focus:border-primary outline-none mb-4"
+              className={`w-full bg-darker border rounded-lg p-3 text-white focus:outline-none mb-2
+                ${apiStatus === 'error' ? 'border-red-500' : 
+                  apiStatus === 'connected' ? 'border-green-500' : 'border-gray-600 focus:border-primary'}
+              `}
             />
+            
+            {/* Status Message */}
+            <div className="min-h-[24px] mb-4 text-sm font-bold">
+               {apiStatus === 'validating' && <span className="text-yellow-400">...دڵنیابوونەوە</span>}
+               {apiStatus === 'connected' && <span className="text-green-500">✓ بە سەرکەوتوویی پەیوەست کرا (Connected)</span>}
+               {apiStatus === 'error' && <span className="text-red-500">✗ هەڵەیە، پەیوەست نابێت</span>}
+            </div>
+
             <div className="flex justify-end gap-3">
               <button onClick={() => setShowApiModal(false)} className="px-4 py-2 text-gray-400 hover:text-white">داخستن</button>
-              <button onClick={saveApiKey} className="px-6 py-2 bg-primary hover:bg-blue-600 text-white rounded-lg font-bold">
+              <button 
+                onClick={saveApiKey} 
+                disabled={apiStatus === 'validating'}
+                className="px-6 py-2 bg-primary hover:bg-blue-600 disabled:opacity-50 text-white rounded-lg font-bold"
+              >
                 پاشەکەوتکردن
               </button>
             </div>
@@ -406,7 +472,7 @@ const App: React.FC = () => {
         onRedo={() => {}}
         onOpenSettings={() => setShowApiModal(true)}
         onToggleRecording={handleToggleRecording}
-        onRunOCR={handleRunOCR}
+        onRunOCR={handleRunOCRClick}
         isRecording={isRecording}
       />
 
