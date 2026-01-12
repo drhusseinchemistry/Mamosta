@@ -16,11 +16,11 @@
               sans: ['"Noto Sans Arabic"', 'system-ui', 'sans-serif'],
             },
             colors: {
-              primary: '#3b82f6', // Slightly lighter blue for better contrast on black
-              secondary: '#18181b', // Zinc 900 - Very dark grey
-              dark: '#09090b',      // Zinc 950 - Almost black
-              darker: '#000000',    // Pure black
-              surface: '#27272a',   // Zinc 800 - Panel color
+              primary: '#3b82f6', 
+              secondary: '#18181b', 
+              dark: '#09090b',      
+              darker: '#000000',    
+              surface: '#27272a',   
             }
           }
         }
@@ -46,15 +46,18 @@
   <script type="importmap">
 {
   "imports": {
-    "lucide-react": "https://esm.sh/lucide-react@^0.562.0",
+    "lucide-react": "https://esm.sh/lucide-react@0.292.0",
+    "react": "https://esm.sh/react@18.2.0",
+    "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+    "react/jsx-runtime": "https://esm.sh/react@18.2.0/jsx-runtime",
+    "react-dom": "https://esm.sh/react-dom@18.2.0",
     "react/": "https://esm.sh/react@^19.2.3/",
-    "react": "https://esm.sh/react@^19.2.3",
     "react-dom/": "https://esm.sh/react-dom@^19.2.3/"
   }
 }
 </script>
 </head>
-  <body class="bg-darker text-gray-100 h-screen overflow-hidden selection:bg-primary selection:text-white">
+  <body class="bg-black text-gray-100 h-screen overflow-hidden selection:bg-primary selection:text-white">
     <div id="root"></div>
   </body>
 </html>
