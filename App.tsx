@@ -4,6 +4,8 @@ import Sidebar from './components/Sidebar';
 import PageEditor from './components/PageEditor';
 import { EditorState, PageData, ToolType } from './types';
 import { initializePDFJS, loadPDFDocument, renderPDFPageToDataURL } from './services/pdfService';
+import { transcribeAudio, performOCR } from './services/geminiService';
+import { Icons } from './components/Icon';
 
 // Declare jsPDF on window
 declare global {
@@ -24,6 +26,13 @@ const App: React.FC = () => {
     statusMessage: null
   });
 
+  // AI & Settings State
+  const [apiKey, setApiKey] = useState<string>('');
+  const [showApiModal, setShowApiModal] = useState<boolean>(false);
+  const [isRecording, setIsRecording] = useState<boolean>(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+
   // Store fabric canvas instances
   const canvasesRef = useRef<{[key: number]: any}>({});
   const pdfDocRef = useRef<any>(null);
@@ -34,7 +43,128 @@ const App: React.FC = () => {
        initializePDFJS();
     };
     loadLibs();
+    
+    // Load API Key from local storage
+    const savedKey = localStorage.getItem('gemini_api_key');
+    if (savedKey) setApiKey(savedKey);
   }, []);
+
+  // --- API Key Management ---
+  const saveApiKey = () => {
+    localStorage.setItem('gemini_api_key', apiKey);
+    setShowApiModal(false);
+  };
+
+  // --- Audio Recording (STT) ---
+  const handleToggleRecording = async () => {
+    if (!apiKey) {
+      alert("تکایە سەرەتا API Key زیاد بکە لە ڕێکخستنەکان");
+      setShowApiModal(true);
+      return;
+    }
+
+    if (isRecording) {
+      // Stop Recording
+      mediaRecorderRef.current?.stop();
+      setIsRecording(false);
+    } else {
+      // Start Recording
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const mediaRecorder = new MediaRecorder(stream);
+        mediaRecorderRef.current = mediaRecorder;
+        audioChunksRef.current = [];
+
+        mediaRecorder.ondataavailable = (event) => {
+          if (event.data.size > 0) {
+            audioChunksRef.current.push(event.data);
+          }
+        };
+
+        mediaRecorder.onstop = async () => {
+           // Create Blob
+           const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+           // Stop tracks
+           stream.getTracks().forEach(track => track.stop());
+
+           // Process with AI
+           setEditorState(prev => ({...prev, isProcessing: true, statusMessage: '...گۆڕینی دەنگ بۆ نووسین'}));
+           try {
+             const text = await transcribeAudio(apiKey, audioBlob);
+             if (text) {
+               addTextToCanvas(text);
+             }
+           } catch (error) {
+             alert("کێشەیەک ڕوویدا لە کاتی گۆڕینی دەنگ: " + error);
+           } finally {
+             setEditorState(prev => ({...prev, isProcessing: false, statusMessage: null}));
+           }
+        };
+
+        mediaRecorder.start();
+        setIsRecording(true);
+      } catch (err) {
+        console.error("Error accessing microphone:", err);
+        alert("ناتوانین دەستکاری مایک بکەین.");
+      }
+    }
+  };
+
+  // --- OCR Logic ---
+  const handleRunOCR = async () => {
+    if (!apiKey) {
+      alert("تکایە سەرەتا API Key زیاد بکە لە ڕێکخستنەکان");
+      setShowApiModal(true);
+      return;
+    }
+
+    const activeCanvas = canvasesRef.current[activePage];
+    if (!activeCanvas) return;
+
+    setEditorState(prev => ({...prev, isProcessing: true, statusMessage: '...OCR پشکنینی وێنە'}));
+
+    try {
+      // Get image data from current canvas view (ignoring current selection to get full context or bg)
+      // Usually better to just send the background image or the whole rendered canvas
+      const dataUrl = activeCanvas.toDataURL({ format: 'jpeg', quality: 0.8 });
+      
+      const text = await performOCR(apiKey, dataUrl);
+      if (text) {
+        // Option 1: Add to canvas
+        addTextToCanvas(text);
+        // Option 2: Alert for copy (could be improved with a modal result)
+        // alert("OCR Result:\n" + text);
+      } else {
+        alert("هیچ نووسینێک نەدۆزرایەوە");
+      }
+    } catch (error) {
+      alert("OCR Failed: " + error);
+    } finally {
+      setEditorState(prev => ({...prev, isProcessing: false, statusMessage: null}));
+    }
+  };
+
+  // Helper to add text to canvas
+  const addTextToCanvas = (text: string) => {
+    const activeCanvas = canvasesRef.current[activePage];
+    if (activeCanvas && window.fabric) {
+      const iText = new window.fabric.IText(text, {
+        left: 50,
+        top: 50,
+        fontSize: 20,
+        fill: editorState.strokeColor,
+        fontFamily: 'Noto Sans Arabic',
+        direction: 'rtl',
+        textAlign: 'right',
+        width: 300
+      });
+      activeCanvas.add(iText);
+      activeCanvas.setActiveObject(iText);
+      activeCanvas.renderAll();
+      setEditorState(prev => ({...prev, activeTool: 'select'})); // Switch to select to edit text
+    }
+  };
+
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -142,10 +272,8 @@ const App: React.FC = () => {
 
       try {
           const { jsPDF } = window.jspdf;
-          // Create PDF based on first page dimensions, or default A4
           const firstPage = pages[0];
           const orientation = firstPage && firstPage.viewport.width > firstPage.viewport.height ? 'l' : 'p';
-          const format = firstPage ? [firstPage.viewport.width * 0.75, firstPage.viewport.height * 0.75] : 'a4'; // Approx conversion px to pt
           
           const doc = new jsPDF({
               orientation: orientation,
@@ -153,24 +281,19 @@ const App: React.FC = () => {
               format: [firstPage.viewport.width, firstPage.viewport.height]
           });
 
-          // Remove the default empty page added by new jsPDF() if we are going to add pages manually
-          // but jsPDF starts with one page. We will fill it, then add more.
-
           for (let i = 0; i < pages.length; i++) {
               const page = pages[i];
               const canvas = canvasesRef.current[page.pageNumber];
               
               if (!canvas) continue;
 
-              // Deselect everything before export to avoid selection handles in PDF
               canvas.discardActiveObject();
               canvas.renderAll();
 
-              // Get High Quality Image from Canvas
               const dataURL = canvas.toDataURL({
                   format: 'jpeg',
                   quality: 0.8,
-                  multiplier: 1 // Increase for higher res
+                  multiplier: 1 
               });
 
               if (i > 0) {
@@ -237,6 +360,35 @@ const App: React.FC = () => {
         </div>
       )}
 
+      {/* API Key Modal */}
+      {showApiModal && (
+        <div className="fixed inset-0 bg-black/90 z-[110] flex items-center justify-center p-4">
+          <div className="bg-surface border border-gray-700 p-6 rounded-xl w-full max-w-md shadow-2xl">
+            <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
+              <Icons.Settings className="text-primary" />
+              ڕێکخستنی AI (Gemini)
+            </h3>
+            <p className="text-gray-400 text-sm mb-4">
+              تکایە API Key تایبەت بە خۆت دابنێ بۆ بەکارهێنانی تایبەتمەندی دەنگ و OCR.
+              دەتوانیت لە <a href="https://aistudio.google.com/app/apikey" target="_blank" className="text-blue-400 underline">Google AI Studio</a> وەربگریت.
+            </p>
+            <input 
+              type="password" 
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="Paste Gemini API Key here..."
+              className="w-full bg-darker border border-gray-600 rounded-lg p-3 text-white focus:border-primary outline-none mb-4"
+            />
+            <div className="flex justify-end gap-3">
+              <button onClick={() => setShowApiModal(false)} className="px-4 py-2 text-gray-400 hover:text-white">داخستن</button>
+              <button onClick={saveApiKey} className="px-6 py-2 bg-primary hover:bg-blue-600 text-white rounded-lg font-bold">
+                پاشەکەوتکردن
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Floating Toolbar */}
       <Toolbar 
         editorState={editorState}
@@ -252,6 +404,10 @@ const App: React.FC = () => {
         canRedo={false}
         onUndo={() => {}}
         onRedo={() => {}}
+        onOpenSettings={() => setShowApiModal(true)}
+        onToggleRecording={handleToggleRecording}
+        onRunOCR={handleRunOCR}
+        isRecording={isRecording}
       />
 
       <div className="flex flex-1 overflow-hidden flex-col md:flex-row pt-24 md:pt-0">
@@ -305,7 +461,7 @@ const App: React.FC = () => {
       
       {/* Footer Info */}
       <div className="bg-black/90 border-t border-gray-800 p-1 px-4 text-xs text-gray-600 flex justify-between z-40 relative">
-         <span>Kurdish PDF Editor v2.1</span>
+         <span>Kurdish PDF Editor v2.2 (AI Powered)</span>
          <span>{pages.length} Pages</span>
       </div>
     </div>

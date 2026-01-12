@@ -16,6 +16,11 @@ interface ToolbarProps {
   canRedo: boolean;
   onUndo: () => void;
   onRedo: () => void;
+  // AI Props
+  onOpenSettings: () => void;
+  onToggleRecording: () => void;
+  onRunOCR: () => void;
+  isRecording: boolean;
 }
 
 const ToolButton: React.FC<{
@@ -24,7 +29,8 @@ const ToolButton: React.FC<{
   icon: React.ElementType;
   label: string;
   title: string;
-}> = ({ active, onClick, icon: Icon, label, title }) => (
+  className?: string;
+}> = ({ active, onClick, icon: Icon, label, title, className = "" }) => (
   <button
     onClick={onClick}
     title={title}
@@ -33,10 +39,11 @@ const ToolButton: React.FC<{
       ${active 
         ? 'bg-primary text-white shadow-[0_0_15px_rgba(59,130,246,0.6)] border-primary scale-110' 
         : 'text-gray-300 hover:bg-white/10 hover:text-white border border-transparent'}
+      ${className}
     `}
   >
     <Icon size={18} />
-    {/* Labels hidden on mobile, visible on lg screens if needed, but keeping it minimal */}
+    {/* Labels hidden on mobile, visible on lg screens if needed */}
     <span className="hidden lg:block text-[9px] mt-0.5 font-medium opacity-80">{label}</span>
   </button>
 );
@@ -54,13 +61,17 @@ const Toolbar: React.FC<ToolbarProps> = ({
   canUndo,
   canRedo,
   onUndo,
-  onRedo
+  onRedo,
+  onOpenSettings,
+  onToggleRecording,
+  onRunOCR,
+  isRecording
 }) => {
   return (
     <div className="fixed top-4 left-0 right-0 mx-auto w-max max-w-[95vw] z-50 animate-in slide-in-from-top-4 fade-in duration-300">
       <div className="bg-black/70 backdrop-blur-md border border-white/10 shadow-2xl rounded-2xl flex flex-col items-center gap-1 p-2">
         
-        {/* Top Row: File Operations & Undo/Redo */}
+        {/* Top Row: File Operations, AI Settings & Undo/Redo */}
         <div className="flex items-center gap-2 w-full justify-between px-2 pb-1 border-b border-white/10">
           <div className="flex items-center gap-2">
             <label className="p-1.5 bg-blue-600/90 hover:bg-blue-600 text-white rounded-lg cursor-pointer transition-colors" title="ڤەکرنا PDF">
@@ -75,6 +86,15 @@ const Toolbar: React.FC<ToolbarProps> = ({
             <button onClick={onAddPage} className="p-1.5 bg-gray-700/80 hover:bg-gray-600 text-white rounded-lg transition-colors" title="لاپەرێ سپی">
               <Icons.Plus size={16} />
             </button>
+
+            {/* API Settings Icon */}
+            <button 
+              onClick={onOpenSettings} 
+              className="p-1.5 bg-purple-700/80 hover:bg-purple-600 text-white rounded-lg transition-colors ml-1" 
+              title="ڕێکخستنی API"
+            >
+              <Icons.Settings size={16} />
+            </button>
           </div>
 
           <div className="flex items-center gap-1 border-l border-white/10 pl-2">
@@ -87,13 +107,26 @@ const Toolbar: React.FC<ToolbarProps> = ({
           </div>
         </div>
 
-        {/* Bottom Row: Drawing Tools */}
+        {/* Bottom Row: Drawing Tools & AI Features */}
         <div className="flex flex-wrap items-center justify-center gap-1 pt-1">
            <ToolButton active={editorState.activeTool === 'select'} onClick={() => onToolChange('select')} icon={Icons.Select} label="دیارکرن" title="دیارکرن" />
            <ToolButton active={editorState.activeTool === 'pen'} onClick={() => onToolChange('pen')} icon={Icons.Pen} label="قەلەم" title="قەلەم" />
            <ToolButton active={editorState.activeTool === 'highlighter'} onClick={() => onToolChange('highlighter')} icon={Icons.Highlighter} label="هایلایت" title="هایلایت" />
            <ToolButton active={editorState.activeTool === 'text'} onClick={() => onToolChange('text')} icon={Icons.Text} label="نڤیسین" title="نڤیسین" />
            
+           {/* Voice Input */}
+           <ToolButton 
+             active={isRecording} 
+             onClick={onToggleRecording} 
+             icon={Icons.Mic} 
+             label={isRecording ? "تۆمارکرن..." : "دەنگ"} 
+             title="گۆڕینی دەنگ بۆ نووسین"
+             className={isRecording ? "animate-pulse bg-red-600 border-red-600 !text-white" : ""}
+           />
+
+           {/* OCR */}
+           <ToolButton active={false} onClick={onRunOCR} icon={Icons.ScanText} label="OCR" title="دەرهێنانی نووسین (OCR)" />
+
            <label className={`
              flex flex-col items-center justify-center p-1.5 rounded-lg transition-all duration-200 min-w-[2.5rem]
              text-gray-300 hover:bg-white/10 hover:text-white cursor-pointer
@@ -106,8 +139,7 @@ const Toolbar: React.FC<ToolbarProps> = ({
 
            <ToolButton active={editorState.activeTool === 'line'} onClick={() => onToolChange('line')} icon={Icons.Line} label="هێل" title="هێل" />
            <ToolButton active={editorState.activeTool === 'rect'} onClick={() => onToolChange('rect')} icon={Icons.Rect} label="چوارگۆشە" title="چوارگۆشە" />
-           <ToolButton active={editorState.activeTool === 'circle'} onClick={() => onToolChange('circle')} icon={Icons.Circle} label="بازنە" title="بازنە" />
-
+           
            <div className="w-px h-6 bg-white/10 mx-1"></div>
 
            {/* Color & Size Compact */}
@@ -118,7 +150,7 @@ const Toolbar: React.FC<ToolbarProps> = ({
                 onChange={(e) => onColorChange(e.target.value)}
                 className="w-6 h-6 rounded-full overflow-hidden cursor-pointer border-2 border-white/20 p-0"
               />
-              <div className="flex flex-col w-16">
+              <div className="flex flex-col w-12">
                  <input 
                   type="range" 
                   min="1" 

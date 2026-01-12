@@ -16,7 +16,10 @@ import {
   Undo2,
   Redo2,
   Image as ImageIcon,
-  FileText
+  FileText,
+  Mic,
+  Settings,
+  ScanText
 } from 'lucide-react';
 
 export const Icons = {
@@ -36,7 +39,10 @@ export const Icons = {
   Undo: Undo2,
   Redo: Redo2,
   Image: ImageIcon,
-  File: FileText
+  File: FileText,
+  Mic: Mic,
+  Settings: Settings,
+  ScanText: ScanText
 };
 
 export type IconName = keyof typeof Icons;
