@@ -1,18 +1,17 @@
 import { GoogleGenAI } from "@google/genai";
 
-const MODEL_NAME = "gemini-2.0-flash-exp"; // Powerful model for Multimodal (Audio/Images)
+const MODEL_NAME = "gemini-2.0-flash-exp"; 
 
 export const transcribeAudio = async (apiKey: string, audioBlob: Blob): Promise<string> => {
   if (!apiKey) throw new Error("API Key is missing");
 
-  // Initialize the SDK
-  const ai = new GoogleGenAI({ apiKey });
-  
-  // Convert Blob to Base64
-  const base64Audio = await blobToBase64(audioBlob);
-  const cleanBase64 = base64Audio.split(',')[1]; // Remove "data:audio/webm;base64," prefix
-
   try {
+    const ai = new GoogleGenAI({ apiKey });
+    
+    // Convert Blob to Base64
+    const base64Audio = await blobToBase64(audioBlob);
+    const cleanBase64 = base64Audio.split(',')[1]; // Remove "data:audio/webm;base64," prefix
+
     const response = await ai.models.generateContent({
       model: MODEL_NAME,
       contents: {
@@ -33,20 +32,23 @@ export const transcribeAudio = async (apiKey: string, audioBlob: Blob): Promise<
     return response.text || "";
   } catch (error: any) {
     console.error("STT Error:", error);
-    if (error.message?.includes("403") || error.message?.includes("API key")) {
-      throw new Error("API Key هەڵەیە یان کار ناکات. تکایە دڵنیابەرەوە.");
+    let msg = error.message || "Unknown error";
+    if (msg.includes("403") || msg.includes("API key")) {
+      throw new Error("API Key هەڵەیە. تکایە دڵنیابەرەوە لە ڕێکخستنەکان.");
+    } else if (msg.includes("not found")) {
+      throw new Error(`مۆدێلی ${MODEL_NAME} نەدۆزرایەوە. تکایە دڵنیابە API Key ەکەت دەسەڵاتی هەیە.`);
     }
-    throw error;
+    throw new Error(msg);
   }
 };
 
 export const performOCR = async (apiKey: string, imageDataUrl: string): Promise<string> => {
   if (!apiKey) throw new Error("API Key is missing");
 
-  const ai = new GoogleGenAI({ apiKey });
-  const cleanBase64 = imageDataUrl.split(',')[1];
-
   try {
+    const ai = new GoogleGenAI({ apiKey });
+    const cleanBase64 = imageDataUrl.split(',')[1];
+
     const response = await ai.models.generateContent({
       model: MODEL_NAME,
       contents: {
@@ -67,10 +69,13 @@ export const performOCR = async (apiKey: string, imageDataUrl: string): Promise<
     return response.text || "";
   } catch (error: any) {
     console.error("OCR Error:", error);
-    if (error.message?.includes("403") || error.message?.includes("API key")) {
-      throw new Error("API Key هەڵەیە یان کار ناکات.");
+    let msg = error.message || "Unknown error";
+    if (msg.includes("403") || msg.includes("API key")) {
+      throw new Error("API Key هەڵەیە. تکایە دڵنیابەرەوە لە ڕێکخستنەکان.");
+    } else if (msg.includes("not found")) {
+      throw new Error(`مۆدێلی ${MODEL_NAME} نەدۆزرایەوە. تکایە دڵنیابە API Key ەکەت دەسەڵاتی هەیە.`);
     }
-    throw error;
+    throw new Error(msg);
   }
 };
 
