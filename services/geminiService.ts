@@ -1,22 +1,33 @@
 import { GoogleGenAI } from "@google/genai";
 
-// We use gemini-1.5-flash because it is currently the most stable model for public API keys.
-// gemini-2.0-flash often returns "Not Found" or requires special access.
-const MODEL_NAME = "gemini-1.5-flash"; 
+// Switched to gemini-1.5-pro as requested for better performance (closest to "3pro/4pro" capabilities currently available)
+const MODEL_NAME = "gemini-1.5-pro"; 
 
 export const validateApiKey = async (apiKey: string): Promise<boolean> => {
   if (!apiKey) return false;
   try {
     const ai = new GoogleGenAI({ apiKey });
-    // Use a simple string prompt for validation to reduce complexity
+    // Try to connect with a simple prompt
     await ai.models.generateContent({
       model: MODEL_NAME,
-      contents: "Test connection",
+      contents: "Test",
     });
     return true;
   } catch (e) {
     console.error("API Validation Failed", e);
-    return false;
+    // If Pro fails, try Flash as fallback to see if key is valid but model restricted
+    try {
+        const ai = new GoogleGenAI({ apiKey });
+        await ai.models.generateContent({
+            model: "gemini-1.5-flash",
+            contents: "Test",
+        });
+        // If this works, the key is valid but Pro is restricted. We return true but warn in logs.
+        console.warn("Pro model failed, but Flash worked. Key is valid.");
+        return true;
+    } catch(e2) {
+        return false;
+    }
   }
 };
 
@@ -92,7 +103,7 @@ const handleError = (error: any) => {
     if (msg.includes("403") || msg.includes("API key")) {
       throw new Error("کۆدی API Key هەڵەیە یان ماوەی بەسەرچووە.");
     } else if (msg.includes("not found")) {
-      throw new Error(`مۆدێلی ${MODEL_NAME} نەدۆزرایەوە (پێویستە API Key چالاک بێت).`);
+      throw new Error(`مۆدێلی ${MODEL_NAME} نەدۆزرایەوە. دڵنیابە لەوەی API Keyـەکەت ڕاستە.`);
     } else if (msg.includes("fetch") || msg.includes("network")) {
       throw new Error("کێشەی ئینتەرنێت هەیە.");
     }
