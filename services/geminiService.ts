@@ -1,22 +1,78 @@
 import { GoogleGenAI } from "@google/genai";
 
-// We use gemini-3.5-flash because it is the most modern, fast, and reliable model for general API keys.
-const MODEL_NAME = "gemini-3.5-flash";
+// We use gemini-3.5-flash as default, but we support fallback models for older/restricted API keys
+export let activeModel = "gemini-3.5-flash";
+export let lastValidationError = "";
+
+// Initialize activeModel from localStorage if available
+try {
+  if (typeof window !== "undefined" && window.localStorage) {
+    const savedModel = window.localStorage.getItem("gemini_active_model");
+    if (savedModel) {
+      activeModel = savedModel;
+    }
+  }
+} catch (e) {
+  console.error("Error reading gemini_active_model from localStorage:", e);
+}
 
 export const validateApiKey = async (apiKey: string): Promise<boolean> => {
-  if (!apiKey) return false;
-  try {
-    const ai = new GoogleGenAI({ apiKey });
-    // Use a simple string prompt for validation
-    await ai.models.generateContent({
-      model: MODEL_NAME,
-      contents: "Test connection",
-    });
-    return true;
-  } catch (e) {
-    console.error("API Validation Failed", e);
+  lastValidationError = "";
+  if (!apiKey) {
+    lastValidationError = "تکایە سەرەتا کلیل بنووسە.";
     return false;
   }
+
+  // Clean the API Key of any whitespace, quotes, or line breaks copied by mistake
+  const cleanKey = apiKey.trim().replace(/^["']|["']$/g, "");
+
+  // Try validating using multiple models to ensure compatibility (gemini-3.5-flash, then gemini-2.5-flash as a fallback)
+  const modelsToTry = ["gemini-3.5-flash", "gemini-2.5-flash"];
+  let lastError: any = null;
+
+  for (const model of modelsToTry) {
+    try {
+      const ai = new GoogleGenAI({ apiKey: cleanKey });
+      await ai.models.generateContent({
+        model: model,
+        contents: "Test connection",
+      });
+      
+      // Successfully connected with this model!
+      activeModel = model;
+      try {
+        if (typeof window !== "undefined" && window.localStorage) {
+          window.localStorage.setItem("gemini_active_model", model);
+        }
+      } catch (e) {
+        console.error(e);
+      }
+      return true;
+    } catch (e: any) {
+      console.error(`Validation failed for model ${model}:`, e);
+      lastError = e;
+    }
+  }
+
+  // If all tried models failed, parse the last error to show a descriptive message to the user
+  let errorMsg = "هەڵەیەک ڕوویدا لە کاتی پەیوەستبوون.";
+  if (lastError) {
+    const rawMsg = lastError.message || String(lastError);
+    if (rawMsg.includes("403") || rawMsg.includes("API key") || rawMsg.includes("not valid") || rawMsg.includes("INVALID_ARGUMENT")) {
+      errorMsg = "کۆدی API Key هەڵەیە یان کار ناکات. تکایە دڵنیابەوە لە کلیلەکەت.";
+    } else if (rawMsg.includes("404") || rawMsg.includes("not found")) {
+      errorMsg = "مۆدێلەکە نەدۆزرایەوە یان پشتگیری ناکرێت لەم ناوچەیە.";
+    } else if (rawMsg.includes("fetch") || rawMsg.includes("network") || rawMsg.includes("Failed to fetch") || rawMsg.includes("cors") || rawMsg.includes("CORS")) {
+      errorMsg = "کێشەی ئینتەرنێت یان ڕێگری لە پەیوەستبوون (CORS/Network error).";
+    } else if (rawMsg.includes("quota") || rawMsg.includes("429")) {
+      errorMsg = "ڕێژەی دیاریکراوی بەکارهێنان (Quota) تەواو بووە.";
+    } else {
+      errorMsg = `کێشەیەک ڕوویدا: ${rawMsg}`;
+    }
+  }
+
+  lastValidationError = errorMsg;
+  return false;
 };
 
 export const transcribeAudio = async (apiKey: string, audioBlob: Blob, language: string = 'ku_badini'): Promise<string> => {
@@ -49,7 +105,7 @@ export const transcribeAudio = async (apiKey: string, audioBlob: Blob, language:
     }
 
     const response = await ai.models.generateContent({
-      model: MODEL_NAME,
+      model: activeModel,
       contents: {
         parts: [
           { 
@@ -80,7 +136,7 @@ export const performOCR = async (apiKey: string, imageDataUrl: string): Promise<
     const cleanBase64 = imageDataUrl.split(',')[1];
 
     const response = await ai.models.generateContent({
-      model: MODEL_NAME,
+      model: activeModel,
       contents: {
         parts: [
           { 
@@ -135,7 +191,7 @@ ${currentText}
     }
 
     const response = await ai.models.generateContent({
-      model: MODEL_NAME,
+      model: activeModel,
       contents: promptText,
     });
 
@@ -167,7 +223,7 @@ export const generateQuestionsFromFile = async (
 - Do not write any conversational preamble or markdown chat introduction. Return ONLY the final clean questions.`;
 
     const response = await ai.models.generateContent({
-      model: MODEL_NAME,
+      model: activeModel,
       contents: [
         {
           text: userPrompt
@@ -195,7 +251,7 @@ const handleError = (error: any) => {
     if (msg.includes("403") || msg.includes("API key")) {
       throw new Error("کۆدی API Key هەڵەیە یان ماوەی بەسەرچووە.");
     } else if (msg.includes("not found")) {
-      throw new Error(`مۆدێلەکە (${MODEL_NAME}) نەدۆزرایەوە. تکایە دڵنیابە لە API Key.`);
+      throw new Error(`مۆدێلەکە (${activeModel}) نەدۆزرایەوە. تکایە دڵنیابە لە API Key.`);
     } else if (msg.includes("fetch") || msg.includes("network")) {
       throw new Error("کێشەی ئینتەرنێت هەیە.");
     }

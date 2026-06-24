@@ -5,7 +5,7 @@ import PageEditor from './components/PageEditor';
 import { TextFormatter } from './components/TextFormatter';
 import { EditorState, PageData, ToolType } from './types';
 import { initializePDFJS, loadPDFDocument, renderPDFPageToDataURL } from './services/pdfService';
-import { transcribeAudio, performOCR, validateApiKey } from './services/geminiService';
+import { transcribeAudio, performOCR, validateApiKey, lastValidationError } from './services/geminiService';
 import { Icons } from './components/Icon';
 
 const ThemeStyleInjector: React.FC<{ theme: string }> = ({ theme }) => {
@@ -78,6 +78,7 @@ const App: React.FC = () => {
   // AI & Settings State
   const [apiKey, setApiKey] = useState<string>('');
   const [apiStatus, setApiStatus] = useState<'idle' | 'validating' | 'connected' | 'error'>('idle');
+  const [apiErrorMessage, setApiErrorMessage] = useState<string>('');
   const [showApiModal, setShowApiModal] = useState<boolean>(false);
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [voiceLanguage, setVoiceLanguage] = useState<string>('ku_badini');
@@ -245,23 +246,27 @@ const App: React.FC = () => {
 
   // --- API Key Management ---
   const saveApiKey = async () => {
-    const cleanKey = apiKey.trim();
+    const cleanKey = apiKey.trim().replace(/^["']|["']$/g, "");
     if (!cleanKey) {
        setApiStatus('error');
+       setApiErrorMessage('تکایە سەرەتا کۆدی کلیلەکە بنووسە.');
        return;
     }
     
     setApiStatus('validating');
+    setApiErrorMessage('');
     const isValid = await validateApiKey(cleanKey);
     
     if (isValid) {
         localStorage.setItem('gemini_api_key', cleanKey);
         setApiKey(cleanKey);
         setApiStatus('connected');
+        setApiErrorMessage('');
         // Auto close after 1.5 second of success
         setTimeout(() => setShowApiModal(false), 1500);
     } else {
         setApiStatus('error');
+        setApiErrorMessage(lastValidationError || 'کۆدی کلیلەکە هەڵەیە یان پەیوەست نابێت.');
     }
   };
 
@@ -898,7 +903,12 @@ const App: React.FC = () => {
                 <div className="min-h-[24px] text-sm font-bold">
                    {apiStatus === 'validating' && <span className="text-yellow-400">...دڵنیابوونەوە</span>}
                    {apiStatus === 'connected' && <span className="text-green-500">✓ بە سەرکەوتوویی پەیوەست کرا (Connected)</span>}
-                   {apiStatus === 'error' && <span className="text-red-500">✗ هەڵەیە، پەیوەست نابێت</span>}
+                   {apiStatus === 'error' && (
+                     <div className="flex flex-col gap-1">
+                       <span className="text-red-500">✗ هەڵەیە، پەیوەست نابێت</span>
+                       {apiErrorMessage && <span className="text-xs text-red-400 font-normal mt-0.5">{apiErrorMessage}</span>}
+                     </div>
+                   )}
                 </div>
               </div>
             )}
