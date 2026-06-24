@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { EditorState, ToolType } from '../types';
+import { Icons } from './Icon';
+import { TextFormatter } from './TextFormatter';
 
 interface PageEditorProps {
   pageNumber: number;
@@ -9,6 +11,13 @@ interface PageEditorProps {
   isActive: boolean;
   onCanvasReady: (pageNumber: number, canvas: any) => void;
   onModified: () => void;
+  isRecording?: boolean;
+  onToggleRecording?: () => void;
+  apiKey?: string;
+  onOpenSettings?: () => void;
+  onTextSelection?: (canvas: any, object: any) => void;
+  onOpenFormatter?: () => void;
+  showFormatterSidebar?: boolean;
 }
 
 const PageEditor: React.FC<PageEditorProps> = ({ 
@@ -18,11 +27,221 @@ const PageEditor: React.FC<PageEditorProps> = ({
   editorState, 
   isActive, 
   onCanvasReady,
-  onModified 
+  onModified,
+  isRecording = false,
+  onToggleRecording,
+  apiKey = '',
+  onOpenSettings,
+  onTextSelection,
+  onOpenFormatter,
+  showFormatterSidebar = false
 }) => {
   const canvasElRef = useRef<HTMLCanvasElement>(null);
   const fabricCanvasRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const [activeTextObject, setActiveTextObject] = useState<any>(null);
+  const [floatingPos, setFloatingPos] = useState<{ x: number; y: number } | null>(null);
+
+  useEffect(() => {
+    if (!activeTextObject || !fabricCanvasRef.current) {
+      setFloatingPos(null);
+      return;
+    }
+    const updatePosition = () => {
+      const activeObj = fabricCanvasRef.current?.getActiveObject();
+      if (activeObj) {
+        try {
+          const rect = activeObj.getBoundingRect();
+          setFloatingPos({
+            x: rect.left + rect.width / 2,
+            y: rect.top - 40
+          });
+        } catch (e) {
+          console.error("Error updating floating position:", e);
+        }
+      } else {
+        setFloatingPos(null);
+      }
+    };
+
+    updatePosition();
+
+    const canvas = fabricCanvasRef.current;
+    if (canvas) {
+      canvas.on('object:moving', updatePosition);
+      canvas.on('object:scaling', updatePosition);
+      canvas.on('object:rotating', updatePosition);
+      canvas.on('selection:updated', updatePosition);
+      canvas.on('selection:created', updatePosition);
+    }
+    return () => {
+      if (canvas) {
+        canvas.off('object:moving', updatePosition);
+        canvas.off('object:scaling', updatePosition);
+        canvas.off('object:rotating', updatePosition);
+        canvas.off('selection:updated', updatePosition);
+        canvas.off('selection:created', updatePosition);
+      }
+    };
+  }, [activeTextObject]);
+
+  const handleDeleteSelected = () => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+    const activeObj = canvas.getActiveObject();
+    if (activeObj) {
+      if (activeObj.type === 'activeSelection') {
+        activeObj.forEachObject((obj: any) => {
+          canvas.remove(obj);
+        });
+        canvas.discardActiveObject();
+      } else {
+        canvas.remove(activeObj);
+        canvas.discardActiveObject();
+      }
+      canvas.renderAll();
+      onModified();
+    }
+  };
+
+  const handleGroupSelected = () => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+    const activeObj = canvas.getActiveObject();
+    if (activeObj && activeObj.type === 'activeSelection') {
+      try {
+        const group = activeObj.toGroup();
+        canvas.setActiveObject(group);
+        canvas.renderAll();
+        onModified();
+        setActiveTextObject(group);
+      } catch (err) {
+        console.error("Error grouping objects:", err);
+      }
+    }
+  };
+
+  const handleUngroupSelected = () => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+    const activeObj = canvas.getActiveObject();
+    if (activeObj && activeObj.type === 'group') {
+      try {
+        const activeSel = activeObj.toActiveSelection();
+        canvas.setActiveObject(activeSel);
+        canvas.renderAll();
+        onModified();
+        setActiveTextObject(activeSel);
+      } catch (err) {
+        console.error("Error ungrouping objects:", err);
+      }
+    }
+  };
+
+  const handleCopySelected = () => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+    const activeObj = canvas.getActiveObject();
+    if (activeObj) {
+      activeObj.clone((clonedObj: any) => {
+        canvas.discardActiveObject();
+        clonedObj.set({
+          left: clonedObj.left + 15,
+          top: clonedObj.top + 15,
+          evented: true,
+        });
+        if (clonedObj.type === 'activeSelection') {
+          clonedObj.canvas = canvas;
+          clonedObj.forEachObject((obj: any) => {
+            canvas.add(obj);
+          });
+          clonedObj.setCoords();
+        } else {
+          canvas.add(clonedObj);
+        }
+        canvas.setActiveObject(clonedObj);
+        canvas.renderAll();
+        onModified();
+      });
+    }
+  };
+
+  const handleDragStart = (e: React.MouseEvent | React.TouchEvent) => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+    const activeObj = canvas.getActiveObject();
+    if (!activeObj) return;
+
+    if (e.cancelable) {
+      e.preventDefault();
+    }
+
+    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+    const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
+
+    const initialLeft = activeObj.left || 0;
+    const initialTop = activeObj.top || 0;
+
+    const onDragMove = (moveEvent: MouseEvent | TouchEvent) => {
+      if (moveEvent.cancelable) {
+        moveEvent.preventDefault();
+      }
+      const currentX = 'touches' in moveEvent ? moveEvent.touches[0].clientX : moveEvent.clientX;
+      const currentY = 'touches' in moveEvent ? moveEvent.touches[0].clientY : moveEvent.clientY;
+
+      const dx = currentX - clientX;
+      const dy = currentY - clientY;
+
+      activeObj.set({
+        left: initialLeft + dx,
+        top: initialTop + dy
+      });
+      activeObj.setCoords();
+      canvas.renderAll();
+
+      try {
+        const rect = activeObj.getBoundingRect();
+        setFloatingPos({
+          x: rect.left + rect.width / 2,
+          y: rect.top - 45
+        });
+      } catch (err) {
+        console.error(err);
+      }
+    };
+
+    const onDragEnd = () => {
+      window.removeEventListener('mousemove', onDragMove);
+      window.removeEventListener('mouseup', onDragEnd);
+      window.removeEventListener('touchmove', onDragMove);
+      window.removeEventListener('touchend', onDragEnd);
+      onModified();
+    };
+
+    window.addEventListener('mousemove', onDragMove, { passive: false });
+    window.addEventListener('mouseup', onDragEnd);
+    window.addEventListener('touchmove', onDragMove, { passive: false });
+    window.addEventListener('touchend', onDragEnd);
+  };
+
+  const onTextSelectionRef = useRef(onTextSelection);
+  useEffect(() => {
+    onTextSelectionRef.current = onTextSelection;
+  }, [onTextSelection]);
+
+  // Clean up selection when page becomes inactive
+  useEffect(() => {
+    if (!isActive && fabricCanvasRef.current) {
+      try {
+        fabricCanvasRef.current.discardActiveObject();
+        fabricCanvasRef.current.renderAll();
+      } catch (e) {
+        console.error(e);
+      }
+      setActiveTextObject(null);
+      onTextSelectionRef.current?.(fabricCanvasRef.current, null);
+    }
+  }, [isActive]);
 
   // Initialize Fabric Canvas
   useEffect(() => {
@@ -50,6 +269,35 @@ const PageEditor: React.FC<PageEditorProps> = ({
     canvas.on('object:modified', onModified);
     canvas.on('object:removed', onModified);
     canvas.on('path:created', onModified);
+
+    // Track active object selections or editing
+    const updateTextState = () => {
+      const activeObj = canvas.getActiveObject();
+      if (activeObj) {
+        setActiveTextObject(activeObj);
+        onTextSelectionRef.current?.(canvas, activeObj);
+      } else {
+        setActiveTextObject(null);
+        onTextSelectionRef.current?.(canvas, null);
+      }
+    };
+
+    canvas.on('selection:created', updateTextState);
+    canvas.on('selection:updated', updateTextState);
+    canvas.on('selection:cleared', () => {
+      setActiveTextObject(null);
+      onTextSelectionRef.current?.(canvas, null);
+    });
+    canvas.on('text:editing:entered', () => {
+      const activeObj = canvas.getActiveObject();
+      if (activeObj && (activeObj.type === 'i-text' || activeObj.type === 'text')) {
+        setActiveTextObject(activeObj);
+        onTextSelectionRef.current?.(canvas, activeObj);
+      }
+    });
+    canvas.on('text:editing:exited', () => {
+      setTimeout(updateTextState, 150);
+    });
 
     return () => {
       canvas.dispose();
@@ -211,6 +459,8 @@ const PageEditor: React.FC<PageEditorProps> = ({
 
   }, [editorState, pageNumber]);
 
+  const showVoiceButton = isActive && (!!activeTextObject || editorState.activeTool === 'text');
+
   return (
     <div 
       ref={containerRef}
@@ -219,6 +469,121 @@ const PageEditor: React.FC<PageEditorProps> = ({
       style={{ width: viewport?.width, height: viewport?.height }}
     >
       <canvas ref={canvasElRef} />
+      
+      {/* Floating Action Button above Selected Object */}
+      {isActive && floatingPos && (
+        <div 
+          className="absolute z-40 -translate-x-1/2 flex items-center gap-1.5 animate-in fade-in zoom-in-95 duration-150"
+          style={{ 
+            left: `${floatingPos.x}px`, 
+            top: `${floatingPos.y}px` 
+          }}
+        >
+          {/* Drag to Move Handle */}
+          <button
+            onMouseDown={handleDragStart}
+            onTouchStart={handleDragStart}
+            className="flex items-center gap-1 px-2.5 py-1.5 rounded-full border border-blue-800 bg-blue-950/95 text-blue-200 hover:bg-blue-800 hover:text-white shadow-lg text-[10px] font-black cursor-move transition-all duration-150 active:scale-95 whitespace-nowrap touch-none"
+            title="بکێشە بۆ گواستنەوە (Drag to Move)"
+          >
+            <span className="text-blue-400 font-extrabold text-xs">＋</span>
+            <span>ڤەگوهاستن</span>
+          </button>
+
+          {/* Delete Button */}
+          <button
+            onClick={handleDeleteSelected}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-red-800 bg-red-950/95 text-red-200 hover:bg-red-900 hover:text-white shadow-lg text-[10px] font-black transition-all duration-150 active:scale-95 whitespace-nowrap"
+            title="ژێبرن / مسح (Delete)"
+          >
+            <Icons.Trash size={12} className="text-red-400" />
+            <span>مسح</span>
+          </button>
+
+          {/* Copy Button */}
+          <button
+            onClick={handleCopySelected}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-teal-800 bg-teal-950/95 text-teal-200 hover:bg-teal-800 hover:text-white shadow-lg text-[10px] font-black transition-all duration-150 active:scale-95 whitespace-nowrap"
+            title="کۆپیکردن (Copy/Duplicate)"
+          >
+            <Icons.Copy size={11} className="text-teal-400" />
+            <span>کۆپی</span>
+          </button>
+
+          {/* Group Button (Only shown when multiple items are selected / activeSelection) */}
+          {activeTextObject && activeTextObject.type === 'activeSelection' && (
+            <button
+              onClick={handleGroupSelected}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-indigo-800 bg-indigo-950/95 text-indigo-200 hover:bg-indigo-800 hover:text-white shadow-lg text-[10px] font-black transition-all duration-150 active:scale-95 whitespace-nowrap"
+              title="کۆمکرن / گروپ (Group)"
+            >
+              <Icons.Group size={12} className="text-indigo-400 animate-pulse" />
+              <span>گروپ</span>
+            </button>
+          )}
+
+          {/* Ungroup Button (Only shown when a group is selected) */}
+          {activeTextObject && activeTextObject.type === 'group' && (
+            <button
+              onClick={handleUngroupSelected}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-amber-800 bg-amber-950/95 text-amber-200 hover:bg-amber-850 hover:text-white shadow-lg text-[10px] font-black transition-all duration-150 active:scale-95 whitespace-nowrap"
+              title="لێکجوداکرن / ئەن گروپ (Ungroup)"
+            >
+              <Icons.Ungroup size={12} className="text-amber-400" />
+              <span>ئەن گروپ</span>
+            </button>
+          )}
+
+          {/* Text Formatting Button (Only shown for text objects) */}
+          {activeTextObject && (activeTextObject.type === 'i-text' || activeTextObject.type === 'text') && (
+            <button
+              onClick={() => {
+                if (onOpenFormatter) onOpenFormatter();
+              }}
+              className={`
+                flex items-center gap-1.5 px-3 py-1.5 rounded-full border shadow-lg text-[10px] font-black transition-all duration-150 active:scale-95 whitespace-nowrap
+                ${showFormatterSidebar 
+                  ? 'bg-primary text-white border-primary shadow-primary/20' 
+                  : 'bg-zinc-950/95 text-white border-zinc-700 hover:bg-zinc-900 hover:border-zinc-500'}
+              `}
+              title="ڕێکخستنێن دەقی (Text Formatting)"
+            >
+              <Icons.Sliders size={12} className={showFormatterSidebar ? "animate-pulse text-white" : "text-blue-400"} />
+              <span>رێکخستنا دەقی</span>
+            </button>
+          )}
+        </div>
+      )}
+      
+      {/* Floating Speaker/Headphone Voice Typing Button */}
+      {showVoiceButton && (
+        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-30 animate-bounce">
+          <button
+            onClick={() => {
+              if (!apiKey) {
+                alert("تکایە سەرەتا API Key زیاد بکە لە ڕێکخستنەکان");
+                if (onOpenSettings) onOpenSettings();
+                return;
+              }
+              if (onToggleRecording) onToggleRecording();
+            }}
+            className={`
+              flex items-center gap-2 px-4 py-2 rounded-full border shadow-xl text-xs font-bold transition-all duration-300 whitespace-nowrap
+              ${isRecording 
+                ? 'bg-red-600 text-white border-red-500 animate-pulse' 
+                : 'bg-zinc-950/95 text-white border-zinc-700 hover:bg-zinc-800 hover:border-zinc-500'}
+            `}
+            title="ب دەنگی بنڤیسە (Speak to Type in Kurdish)"
+          >
+            <div className="flex items-center justify-center p-1 bg-primary/20 text-primary rounded-full">
+              <Icons.Volume size={14} className={isRecording ? "text-white animate-ping" : "text-blue-400"} />
+            </div>
+            <span>
+              {isRecording ? 'تۆمارکرن... ئاخفتنێ بکە' : 'ب دەنگ بنڤیسە (سەماعە)'}
+            </span>
+          </button>
+        </div>
+      )}
       
       {/* Page Number Indicator */}
       <div className="absolute -left-10 top-0 text-gray-400 font-bold text-lg hidden xl:block">

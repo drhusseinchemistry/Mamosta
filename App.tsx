@@ -2,14 +2,70 @@ import React, { useState, useEffect, useRef } from 'react';
 import Toolbar from './components/Toolbar';
 import Sidebar from './components/Sidebar';
 import PageEditor from './components/PageEditor';
+import { TextFormatter } from './components/TextFormatter';
 import { EditorState, PageData, ToolType } from './types';
 import { initializePDFJS, loadPDFDocument, renderPDFPageToDataURL } from './services/pdfService';
 import { transcribeAudio, performOCR, validateApiKey } from './services/geminiService';
 import { Icons } from './components/Icon';
 
+const ThemeStyleInjector: React.FC<{ theme: string }> = ({ theme }) => {
+  let primary = '#3b82f6'; // default tailwind blue
+  let hover = '#1d4ed8';
+  let ringColor = 'rgba(59, 130, 246, 0.4)';
+
+  if (theme === 'indigo') {
+    primary = '#6366f1';
+    hover = '#4f46e5';
+    ringColor = 'rgba(99, 102, 241, 0.4)';
+  } else if (theme === 'emerald') {
+    primary = '#10b981';
+    hover = '#059669';
+    ringColor = 'rgba(16, 185, 129, 0.4)';
+  } else if (theme === 'purple') {
+    primary = '#8b5cf6';
+    hover = '#7c3aed';
+    ringColor = 'rgba(139, 92, 246, 0.4)';
+  } else if (theme === 'gold') {
+    primary = '#f59e0b';
+    hover = '#d97706';
+    ringColor = 'rgba(245, 158, 11, 0.4)';
+  } else if (theme === 'slate') {
+    primary = '#71717a';
+    hover = '#52525b';
+    ringColor = 'rgba(113, 113, 122, 0.4)';
+  }
+
+  const css = `
+    .bg-primary { background-color: ${primary} !important; }
+    .hover\\:bg-primary:hover { background-color: ${hover} !important; }
+    .text-primary { color: ${primary} !important; }
+    .border-primary { border-color: ${primary} !important; }
+    .focus\\:border-primary:focus { border-color: ${primary} !important; }
+    .accent-primary { accent-color: ${primary} !important; }
+    .ring-primary { --tw-ring-color: ${primary} !important; ring-color: ${primary} !important; }
+    
+    /* Active toolbar selections style */
+    .bg-primary.text-white {
+      background-color: ${primary} !important;
+      box-shadow: 0 0 15px ${ringColor} !important;
+    }
+  `;
+
+  return <style dangerouslySetInnerHTML={{ __html: css }} />;
+};
+
 const App: React.FC = () => {
   const [pages, setPages] = useState<PageData[]>([]);
   const [activePage, setActivePage] = useState<number>(1);
+  const [activeTextSelection, setActiveTextSelection] = useState<{ canvas: any; object: any } | null>(null);
+  const [showFormatterSidebar, setShowFormatterSidebar] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (!activeTextSelection) {
+      setShowFormatterSidebar(false);
+    }
+  }, [activeTextSelection]);
+
   const [editorState, setEditorState] = useState<EditorState>({
     activeTool: 'pen',
     strokeColor: '#FFD700',
@@ -24,15 +80,133 @@ const App: React.FC = () => {
   const [apiStatus, setApiStatus] = useState<'idle' | 'validating' | 'connected' | 'error'>('idle');
   const [showApiModal, setShowApiModal] = useState<boolean>(false);
   const [isRecording, setIsRecording] = useState<boolean>(false);
+  const [voiceLanguage, setVoiceLanguage] = useState<string>('ku_badini');
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   
+  // Customizable Settings
+  const [iconSize, setIconSize] = useState<number>(18);
+  const [appTheme, setAppTheme] = useState<string>('indigo'); // indigo, emerald, purple, gold, slate
+  const [listMarkerStyle, setListMarkerStyle] = useState<string>('•'); // •, ●, ■, ★, ✔, -
+  const [settingsTab, setSettingsTab] = useState<'design' | 'ai'>('design');
+
   // Hidden inputs refs
   const ocrInputRef = useRef<HTMLInputElement>(null);
 
   // Store fabric canvas instances
   const canvasesRef = useRef<{[key: number]: any}>({});
   const pdfDocRef = useRef<any>(null);
+  const pendingCanvasesRef = useRef<Record<number, any> | null>(null);
+
+  // Undo/Redo Canvas History State
+  const canvasHistoryRef = useRef<{[pageNumber: number]: {
+    undoStack: string[];
+    redoStack: string[];
+    isApplying: boolean;
+  }}>({});
+
+  const [forceUpdate, setForceUpdate] = useState<number>(0);
+
+  const getPageHistory = (pageNumber: number) => {
+    if (!canvasHistoryRef.current[pageNumber]) {
+      canvasHistoryRef.current[pageNumber] = {
+        undoStack: [],
+        redoStack: [],
+        isApplying: false
+      };
+    }
+    return canvasHistoryRef.current[pageNumber];
+  };
+
+  const saveCanvasState = (pageNumber: number) => {
+    const canvas = canvasesRef.current[pageNumber];
+    if (!canvas) return;
+    const history = getPageHistory(pageNumber);
+    if (history.isApplying) return;
+
+    try {
+      const stateJson = JSON.stringify(canvas.toJSON());
+      const lastState = history.undoStack[history.undoStack.length - 1];
+      if (stateJson !== lastState) {
+        history.undoStack.push(stateJson);
+        history.redoStack = []; // Clear redo stack on new action
+        if (history.undoStack.length > 50) {
+          history.undoStack.shift();
+        }
+        setForceUpdate(prev => prev + 1);
+      }
+    } catch (e) {
+      console.error("Error saving canvas state:", e);
+    }
+  };
+
+  const handleUndo = () => {
+    const canvas = canvasesRef.current[activePage];
+    if (!canvas) return;
+    const history = getPageHistory(activePage);
+    if (history.undoStack.length <= 1) return;
+
+    const currentState = history.undoStack.pop();
+    if (currentState) {
+      history.redoStack.push(currentState);
+    }
+
+    const previousState = history.undoStack[history.undoStack.length - 1];
+    if (previousState) {
+      history.isApplying = true;
+      canvas.loadFromJSON(JSON.parse(previousState), () => {
+        const page = pages.find(p => p.pageNumber === activePage);
+        if (page && page.image) {
+          window.fabric.Image.fromURL(page.image, (img: any) => {
+            canvas.setBackgroundImage(img, () => {
+              canvas.renderAll();
+              history.isApplying = false;
+              setForceUpdate(prev => prev + 1);
+            }, {
+              scaleX: canvas.width! / img.width!,
+              scaleY: canvas.height! / img.height!
+            });
+          });
+        } else {
+          canvas.renderAll();
+          history.isApplying = false;
+          setForceUpdate(prev => prev + 1);
+        }
+      });
+    }
+  };
+
+  const handleRedo = () => {
+    const canvas = canvasesRef.current[activePage];
+    if (!canvas) return;
+    const history = getPageHistory(activePage);
+    if (history.redoStack.length === 0) return;
+
+    const nextState = history.redoStack.pop();
+    if (nextState) {
+      history.undoStack.push(nextState);
+      history.isApplying = true;
+      canvas.loadFromJSON(JSON.parse(nextState), () => {
+        const page = pages.find(p => p.pageNumber === activePage);
+        if (page && page.image) {
+          window.fabric.Image.fromURL(page.image, (img: any) => {
+            canvas.setBackgroundImage(img, () => {
+              canvas.renderAll();
+              history.isApplying = false;
+              setForceUpdate(prev => prev + 1);
+            }, {
+              scaleX: canvas.width! / img.width!,
+              scaleY: canvas.height! / img.height!
+            });
+          });
+        } else {
+          canvas.renderAll();
+          history.isApplying = false;
+          setForceUpdate(prev => prev + 1);
+        }
+      });
+    }
+  };
 
   // Initialize external libraries
   useEffect(() => {
@@ -47,7 +221,27 @@ const App: React.FC = () => {
       setApiKey(savedKey);
       setApiStatus('connected'); // Assume connected if key exists locally
     }
+
+    // Load custom settings
+    const savedIconSize = localStorage.getItem('app_icon_size');
+    if (savedIconSize) setIconSize(Number(savedIconSize));
+
+    const savedTheme = localStorage.getItem('app_theme');
+    if (savedTheme) setAppTheme(savedTheme);
+
+    const savedListMarker = localStorage.getItem('app_list_marker');
+    if (savedListMarker) setListMarkerStyle(savedListMarker);
   }, []);
+
+  // Save Settings handler
+  const saveCustomSettings = (newSize: number, newTheme: string, newMarker: string) => {
+    setIconSize(newSize);
+    setAppTheme(newTheme);
+    setListMarkerStyle(newMarker);
+    localStorage.setItem('app_icon_size', String(newSize));
+    localStorage.setItem('app_theme', newTheme);
+    localStorage.setItem('app_list_marker', newMarker);
+  };
 
   // --- API Key Management ---
   const saveApiKey = async () => {
@@ -106,7 +300,7 @@ const App: React.FC = () => {
            // Process with AI
            setEditorState(prev => ({...prev, isProcessing: true, statusMessage: '...گۆڕینی دەنگ بۆ نووسین'}));
            try {
-             const text = await transcribeAudio(apiKey, audioBlob);
+             const text = await transcribeAudio(apiKey, audioBlob, voiceLanguage);
              if (text) {
                addTextToCanvas(text);
              }
@@ -180,6 +374,19 @@ const App: React.FC = () => {
   const addTextToCanvas = (text: string) => {
     const activeCanvas = canvasesRef.current[activePage];
     if (activeCanvas && window.fabric) {
+      const activeObj = activeCanvas.getActiveObject();
+      if (activeObj && (activeObj.isType('i-text') || activeObj.isType('text'))) {
+        const currentText = activeObj.text || '';
+        // If it was the default placeholder "بنڤیسە", replace it entirely
+        if (currentText === 'بنڤیسە') {
+          activeObj.set('text', text);
+        } else {
+          activeObj.set('text', currentText + ' ' + text);
+        }
+        activeCanvas.renderAll();
+        return;
+      }
+
       const iText = new window.fabric.IText(text, {
         left: 50,
         top: 50,
@@ -201,6 +408,28 @@ const App: React.FC = () => {
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    if (file.name.endsWith('.kpdf') || file.name.endsWith('.json') || file.type === 'application/json') {
+      setEditorState(prev => ({ ...prev, isProcessing: true, statusMessage: '...پڕۆژەی دەستکاریکراو (ڤێکتۆر) باردەکرێت' }));
+      try {
+        const text = await file.text();
+        const project = JSON.parse(text);
+        if (project && project.pages && project.canvases) {
+          pendingCanvasesRef.current = project.canvases;
+          setPages(project.pages);
+          setActivePage(1);
+        } else {
+          alert('کێشەیەک هەیە: پڕۆژەکە دروست نییە یان فایلەکە تێکچووە');
+        }
+      } catch (err: any) {
+        console.error(err);
+        alert('شکستی هێنا لە بارکردنی فایلی پڕۆژە: ' + err.message);
+      } finally {
+        setEditorState(prev => ({ ...prev, isProcessing: false, statusMessage: null }));
+        e.target.value = ''; // Reset input
+      }
+      return;
+    }
 
     setEditorState(prev => ({ ...prev, isProcessing: true, statusMessage: '...PDF تێتە بارکرن' }));
 
@@ -290,6 +519,47 @@ const App: React.FC = () => {
 
   const handleCanvasReady = (pageNumber: number, canvas: any) => {
     canvasesRef.current[pageNumber] = canvas;
+    if (pendingCanvasesRef.current && pendingCanvasesRef.current[pageNumber]) {
+      const canvasJson = pendingCanvasesRef.current[pageNumber];
+      canvas.loadFromJSON(canvasJson, () => {
+        const page = pages.find(p => p.pageNumber === pageNumber);
+        if (page && page.image) {
+          window.fabric.Image.fromURL(page.image, (img: any) => {
+            canvas.setBackgroundImage(img, () => {
+              canvas.renderAll();
+              // Save initial state to history stack after loading JSON and background
+              const history = getPageHistory(pageNumber);
+              if (history.undoStack.length === 0) {
+                history.undoStack.push(JSON.stringify(canvas.toJSON()));
+                setForceUpdate(prev => prev + 1);
+              }
+            }, {
+              scaleX: canvas.width! / img.width!,
+              scaleY: canvas.height! / img.height!
+            });
+          });
+        } else {
+          canvas.renderAll();
+          // Save initial state to history stack after loading JSON
+          const history = getPageHistory(pageNumber);
+          if (history.undoStack.length === 0) {
+            history.undoStack.push(JSON.stringify(canvas.toJSON()));
+            setForceUpdate(prev => prev + 1);
+          }
+        }
+      });
+    } else {
+      // Save initial empty state to history stack
+      setTimeout(() => {
+        if (canvasesRef.current[pageNumber]) {
+          const history = getPageHistory(pageNumber);
+          if (history.undoStack.length === 0) {
+            history.undoStack.push(JSON.stringify(canvasesRef.current[pageNumber].toJSON()));
+            setForceUpdate(prev => prev + 1);
+          }
+        }
+      }, 500);
+    }
   };
 
   const handleExport = async () => {
@@ -343,6 +613,102 @@ const App: React.FC = () => {
       }
   };
 
+  const handleExportFullQuality = async () => {
+      if (!window.jspdf) {
+          alert("JSPDF library not loaded");
+          return;
+      }
+
+      setEditorState(prev => ({ ...prev, isProcessing: true, statusMessage: '...PDF ب کوالێتیا فول تێتە دروستکرن (Full Quality)' }));
+
+      try {
+          const { jsPDF } = window.jspdf;
+          const firstPage = pages[0];
+          const orientation = firstPage && firstPage.viewport.width > firstPage.viewport.height ? 'l' : 'p';
+          
+          const doc = new jsPDF({
+              orientation: orientation,
+              unit: 'px',
+              format: [firstPage.viewport.width, firstPage.viewport.height]
+          });
+
+          for (let i = 0; i < pages.length; i++) {
+              const page = pages[i];
+              const canvas = canvasesRef.current[page.pageNumber];
+              
+              if (!canvas) continue;
+
+              canvas.discardActiveObject();
+              canvas.renderAll();
+
+              // For full quality, use multiplier: 2 and high quality PNG
+              const dataURL = canvas.toDataURL({
+                  format: 'png',
+                  quality: 1.0,
+                  multiplier: 2 
+              });
+
+              if (i > 0) {
+                  doc.addPage([page.viewport.width, page.viewport.height]);
+              }
+              
+              doc.addImage(dataURL, 'PNG', 0, 0, page.viewport.width, page.viewport.height);
+          }
+
+          doc.save("edited-document-full-quality.pdf");
+
+      } catch (e) {
+          console.error(e);
+          alert("کێشەیەک لە دروستکردنی PDF دروست بوو");
+      } finally {
+          setEditorState(prev => ({ ...prev, isProcessing: false, statusMessage: null }));
+      }
+  };
+
+  const handleSaveProject = () => {
+    if (pages.length === 0) {
+      alert("هیچ لاپەڕەیەک نییە بۆ پاشەکەوتکردن");
+      return;
+    }
+
+    setEditorState(prev => ({ ...prev, isProcessing: true, statusMessage: '...پاشەکەوتکردنی پڕۆژەی ڤێکتۆر' }));
+
+    try {
+      // Discard active objects to avoid saving selection box
+      Object.values(canvasesRef.current).forEach(canvas => {
+        if (canvas) {
+          canvas.discardActiveObject();
+          canvas.renderAll();
+        }
+      });
+
+      const projectData = {
+        version: "1.0",
+        pages: pages,
+        canvases: Object.keys(canvasesRef.current).reduce((acc, pageNum) => {
+          const canvas = canvasesRef.current[Number(pageNum)];
+          if (canvas) {
+            acc[Number(pageNum)] = canvas.toJSON();
+          }
+          return acc;
+        }, {} as Record<number, any>)
+      };
+
+      const blob = new Blob([JSON.stringify(projectData)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = "edited-project.kpdf";
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      console.error(err);
+      alert("شکستی هێنا لە پاشەکەوتکردنی پڕۆژە: " + err.message);
+    } finally {
+      setEditorState(prev => ({ ...prev, isProcessing: false, statusMessage: null }));
+    }
+  };
+
   const handleAddPage = () => {
     const width = 595;
     const height = 842;
@@ -382,6 +748,8 @@ const App: React.FC = () => {
 
   return (
     <div className="flex flex-col h-screen bg-neutral-900">
+      <ThemeStyleInjector theme={appTheme} />
+
       {/* Hidden Input for OCR */}
       <input 
         type="file" 
@@ -399,49 +767,173 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* API Key Modal */}
+      {/* Settings Modal (Design & AI Settings) */}
       {showApiModal && (
-        <div className="fixed inset-0 bg-black/90 z-[110] flex items-center justify-center p-4">
-          <div className="bg-surface border border-gray-700 p-6 rounded-xl w-full max-w-md shadow-2xl">
-            <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
-              <Icons.Settings className="text-primary" />
-              ڕێکخستنی AI (Gemini)
-            </h3>
-            <p className="text-gray-400 text-sm mb-4">
-              تکایە API Key تایبەت بە خۆت دابنێ بۆ بەکارهێنانی تایبەتمەندی دەنگ و OCR.
-              دەتوانیت لە <a href="https://aistudio.google.com/app/apikey" target="_blank" className="text-blue-400 underline">Google AI Studio</a> وەربگریت.
-            </p>
-            <input 
-              type="password" 
-              value={apiKey}
-              onChange={(e) => {
-                 setApiKey(e.target.value);
-                 setApiStatus('idle'); // Reset status on edit
-              }}
-              placeholder="Paste Gemini API Key here..."
-              className={`w-full bg-darker border rounded-lg p-3 text-white focus:outline-none mb-2
-                ${apiStatus === 'error' ? 'border-red-500' : 
-                  apiStatus === 'connected' ? 'border-green-500' : 'border-gray-600 focus:border-primary'}
-              `}
-            />
+        <div className="fixed inset-0 bg-black/90 z-[110] flex items-center justify-center p-4 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-surface border border-gray-750 p-6 rounded-2xl w-full max-w-lg shadow-2xl relative text-right">
             
-            {/* Status Message */}
-            <div className="min-h-[24px] mb-4 text-sm font-bold">
-               {apiStatus === 'validating' && <span className="text-yellow-400">...دڵنیابوونەوە</span>}
-               {apiStatus === 'connected' && <span className="text-green-500">✓ بە سەرکەوتوویی پەیوەست کرا (Connected)</span>}
-               {apiStatus === 'error' && <span className="text-red-500">✗ هەڵەیە، پەیوەست نابێت</span>}
-            </div>
+            {/* Modal Title */}
+            <h3 className="text-xl font-bold text-white mb-5 flex items-center justify-start gap-2 border-b border-gray-700 pb-3" dir="rtl">
+              <Icons.Settings className="text-primary" />
+              <span>ڕێکخستنێن گشتی و دیزاینی</span>
+            </h3>
 
-            <div className="flex justify-end gap-3">
-              <button onClick={() => setShowApiModal(false)} className="px-4 py-2 text-gray-400 hover:text-white">داخستن</button>
+            {/* Tab Navigation */}
+            <div className="flex gap-2 mb-6 bg-black/40 p-1 rounded-lg" dir="rtl">
               <button 
-                onClick={saveApiKey} 
-                disabled={apiStatus === 'validating'}
-                className="px-6 py-2 bg-primary hover:bg-blue-600 disabled:opacity-50 text-white rounded-lg font-bold"
+                onClick={() => setSettingsTab('design')}
+                className={`flex-1 py-2 rounded-md font-bold text-xs transition-all ${settingsTab === 'design' ? 'bg-primary text-white shadow-md' : 'text-gray-400 hover:text-white hover:bg-white/5'}`}
               >
-                پاشەکەوتکردن
+                تێم و دیزاین (Theme & Design)
+              </button>
+              <button 
+                onClick={() => setSettingsTab('ai')}
+                className={`flex-1 py-2 rounded-md font-bold text-xs transition-all ${settingsTab === 'ai' ? 'bg-primary text-white shadow-md' : 'text-gray-400 hover:text-white hover:bg-white/5'}`}
+              >
+                ژیریێ دەستکرد (AI Gemini)
               </button>
             </div>
+
+            {/* Tab 1: Design Settings */}
+            {settingsTab === 'design' && (
+              <div className="space-y-6" dir="rtl">
+                
+                {/* Accent/Color Theme */}
+                <div className="space-y-2">
+                  <label className="text-xs text-gray-400 font-extrabold uppercase tracking-wider block text-right">
+                    تێم و دیزاینێ ڕەنگی (Color Theme)
+                  </label>
+                  <div className="grid grid-cols-5 gap-2">
+                    {[
+                      { id: 'indigo', name: 'کۆسمیک', color: 'bg-indigo-600' },
+                      { id: 'emerald', name: 'شاهانە', color: 'bg-emerald-600' },
+                      { id: 'purple', name: 'ڕووناک', color: 'bg-purple-600' },
+                      { id: 'gold', name: 'زێڕینی', color: 'bg-amber-500' },
+                      { id: 'slate', name: 'سادە', color: 'bg-zinc-600' }
+                    ].map(theme => (
+                      <button
+                        key={theme.id}
+                        onClick={() => saveCustomSettings(iconSize, theme.id, listMarkerStyle)}
+                        className={`p-2 rounded-lg border text-center transition-all ${appTheme === theme.id ? 'border-primary bg-primary/10 text-white font-extrabold' : 'border-gray-700 bg-black/20 text-gray-400 hover:border-gray-500'}`}
+                      >
+                        <div className={`w-4 h-4 rounded-full ${theme.color} mx-auto mb-1`}></div>
+                        <span className="text-[10px] block">{theme.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Toolbar Icon Size */}
+                <div className="space-y-2">
+                  <label className="text-xs text-gray-400 font-extrabold uppercase tracking-wider block text-right">
+                    قەبارەیا ئایکونێن تووڵباری (Icon Size)
+                  </label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {[
+                      { size: 14, label: 'بچووک (Small)' },
+                      { size: 18, label: 'ناوەڕاست (Medium)' },
+                      { size: 22, label: 'مەزن (Large)' }
+                    ].map(opt => (
+                      <button
+                        key={opt.size}
+                        onClick={() => saveCustomSettings(opt.size, appTheme, listMarkerStyle)}
+                        className={`py-2 px-3 rounded-lg border text-xs font-bold transition-all ${iconSize === opt.size ? 'border-primary bg-primary/20 text-white font-extrabold' : 'border-gray-700 bg-black/20 text-gray-400 hover:border-gray-500'}`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Default List Style */}
+                <div className="space-y-2">
+                  <label className="text-xs text-gray-400 font-extrabold uppercase tracking-wider block text-right">
+                    شێوازێ نیشاندەرێ لیستان (List Bullet Style)
+                  </label>
+                  <div className="grid grid-cols-5 gap-2">
+                    {[
+                      { marker: '•', label: '• خاڵ' },
+                      { marker: '●', label: '● ڕەق' },
+                      { marker: '■', label: '■ چوارگۆشە' },
+                      { marker: '★', label: '★ ئەستێرە' },
+                      { marker: '✔', label: '✔ نیشان' }
+                    ].map(opt => (
+                      <button
+                        key={opt.marker}
+                        onClick={() => saveCustomSettings(iconSize, appTheme, opt.marker)}
+                        className={`py-2 px-1 rounded-lg border text-center text-xs transition-all ${listMarkerStyle === opt.marker ? 'border-primary bg-primary/20 text-white font-extrabold' : 'border-gray-700 bg-black/20 text-gray-400 hover:border-gray-500'}`}
+                      >
+                        <span className="text-base block mb-0.5">{opt.marker}</span>
+                        <span className="text-[10px]">{opt.label.split(' ')[1]}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+              </div>
+            )}
+
+            {/* Tab 2: AI Settings */}
+            {settingsTab === 'ai' && (
+              <div className="space-y-4 text-right" dir="rtl">
+                <p className="text-gray-400 text-sm">
+                  تکایە API Key تایبەت بە خۆت دابنێ بۆ بەکارهێنانی تایبەتمەندی دەنگ و OCR.
+                  دەتوانیت لە <a href="https://aistudio.google.com/app/apikey" target="_blank" className="text-blue-400 underline">Google AI Studio</a> وەربگریت.
+                </p>
+                <input 
+                  type="password" 
+                  value={apiKey}
+                  onChange={(e) => {
+                     setApiKey(e.target.value);
+                     setApiStatus('idle');
+                  }}
+                  placeholder="Paste Gemini API Key here..."
+                  className={`w-full bg-darker border rounded-lg p-3 text-white focus:outline-none mb-2 text-left
+                    ${apiStatus === 'error' ? 'border-red-500' : 
+                      apiStatus === 'connected' ? 'border-green-500' : 'border-gray-600 focus:border-primary'}
+                  `}
+                />
+                
+                {/* Status Message */}
+                <div className="min-h-[24px] text-sm font-bold">
+                   {apiStatus === 'validating' && <span className="text-yellow-400">...دڵنیابوونەوە</span>}
+                   {apiStatus === 'connected' && <span className="text-green-500">✓ بە سەرکەوتوویی پەیوەست کرا (Connected)</span>}
+                   {apiStatus === 'error' && <span className="text-red-500">✗ هەڵەیە، پەیوەست نابێت</span>}
+                </div>
+              </div>
+            )}
+
+            {/* Modal Actions */}
+            <div className="flex justify-between items-center mt-8 border-t border-gray-700 pt-4" dir="rtl">
+              <button 
+                onClick={() => {
+                  saveCustomSettings(18, 'indigo', '•');
+                }}
+                className="text-xs text-gray-500 hover:text-red-400 transition-colors"
+                title="Reset settings to original defaults"
+              >
+                ڤەگەڕاندن بۆ بنەڕەت (Reset)
+              </button>
+              
+              <div className="flex gap-2">
+                <button 
+                  onClick={() => setShowApiModal(false)} 
+                  className="px-4 py-2 text-xs font-bold bg-gray-800 hover:bg-gray-750 text-white rounded-lg transition-colors"
+                >
+                  داخستن (Close)
+                </button>
+                {settingsTab === 'ai' && (
+                  <button 
+                    onClick={saveApiKey} 
+                    disabled={apiStatus === 'validating'}
+                    className="px-6 py-2 bg-primary hover:opacity-90 disabled:opacity-50 text-white rounded-lg font-bold text-xs transition-opacity"
+                  >
+                    پاشەکەوتکرن (Save Key)
+                  </button>
+                )}
+              </div>
+            </div>
+
           </div>
         </div>
       )}
@@ -455,19 +947,23 @@ const App: React.FC = () => {
         onUpload={handleFileUpload}
         onImageUpload={handleImageUpload}
         onExport={handleExport}
-        onSaveProject={() => alert('Project saved locally (Placeholder)')}
+        onExportFullQuality={handleExportFullQuality}
+        onSaveProject={handleSaveProject}
         onAddPage={handleAddPage}
-        canUndo={false} 
-        canRedo={false}
-        onUndo={() => {}}
-        onRedo={() => {}}
+        canUndo={getPageHistory(activePage).undoStack.length > 1} 
+        canRedo={getPageHistory(activePage).redoStack.length > 0}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
         onOpenSettings={() => setShowApiModal(true)}
         onToggleRecording={handleToggleRecording}
         onRunOCR={handleRunOCRClick}
         isRecording={isRecording}
+        voiceLanguage={voiceLanguage}
+        onVoiceLanguageChange={setVoiceLanguage}
+        iconSize={iconSize}
       />
 
-      <div className="flex flex-1 overflow-hidden flex-col md:flex-row pt-24 md:pt-0">
+      <div className="relative flex flex-1 overflow-hidden flex-col md:flex-row pt-24 md:pt-0">
         {/* Sidebar for Thumbnails */}
         {pages.length > 0 && (
           <Sidebar 
@@ -484,11 +980,11 @@ const App: React.FC = () => {
                 <div className="flex flex-col items-center justify-center h-full text-gray-500 mt-10 md:mt-0">
                     <div className="bg-surface p-8 rounded-2xl border border-gray-700 text-center shadow-2xl max-w-md mx-4">
                         <p className="text-2xl mb-4 font-bold text-gray-200">بەخێربێی بۆ دەستکاریکەری PDF</p>
-                        <p className="mb-6 text-gray-400">تکایە فایلەکا PDF باربکە بۆ دەستپێکرن یان لاپەرەکێ سپی زێدەکەن</p>
+                        <p className="mb-6 text-gray-400">تکایە فایلەکا PDF یان پڕۆژەیەکێ کۆدکراو (.kpdf) باربکە بۆ دەستپێکرن یان لاپەرەکێ سپی زێدەکەن</p>
                          <div className="flex flex-col sm:flex-row gap-4 justify-center">
                              <label className="px-6 py-3 bg-primary hover:bg-blue-600 text-white rounded-lg cursor-pointer transition-colors inline-block font-bold shadow-lg shadow-blue-500/30">
-                                 بارکرنا PDF
-                                 <input type="file" accept=".pdf" className="hidden" onChange={handleFileUpload} />
+                                   بارکرنا PDF یان پڕۆژەی (.kpdf)
+                                   <input type="file" accept=".pdf,.json,.kpdf" className="hidden" onChange={handleFileUpload} />
                              </label>
                              <button 
                                 onClick={handleAddPage}
@@ -497,7 +993,7 @@ const App: React.FC = () => {
                                 لاپەرێ سپی
                              </button>
                          </div>
-                    </div>
+                     </div>
                 </div>
             ) : (
                 pages.map(page => (
@@ -509,13 +1005,49 @@ const App: React.FC = () => {
                         editorState={editorState}
                         isActive={activePage === page.pageNumber}
                         onCanvasReady={handleCanvasReady}
-                        onModified={() => {}}
+                        onModified={() => saveCanvasState(page.pageNumber)}
+                        isRecording={isRecording}
+                        onToggleRecording={handleToggleRecording}
+                        apiKey={apiKey}
+                        onOpenSettings={() => setShowApiModal(true)}
+                        onOpenFormatter={() => setShowFormatterSidebar(prev => !prev)}
+                        showFormatterSidebar={showFormatterSidebar}
+                        onTextSelection={(canvas, obj) => {
+                          if (obj) {
+                            setActiveTextSelection({ canvas, object: obj });
+                          } else {
+                            setActiveTextSelection(null);
+                          }
+                        }}
                     />
                 ))
             )}
         </div>
+
+        {/* Sidebar for Text & Object Formatting (Right Side) */}
+        {pages.length > 0 && activeTextSelection && showFormatterSidebar && (
+          <div className="w-full md:w-[240px] border-t md:border-t-0 md:border-l border-zinc-800 bg-zinc-950 flex flex-col shrink-0 z-30">
+            <TextFormatter 
+              canvas={activeTextSelection.canvas}
+              activeObject={activeTextSelection.object}
+              onModified={() => saveCanvasState(activePage)}
+              onClose={() => {
+                if (activeTextSelection.canvas) {
+                  try {
+                    activeTextSelection.canvas.discardActiveObject();
+                    activeTextSelection.canvas.renderAll();
+                  } catch (e) {
+                    console.error(e);
+                  }
+                }
+                setActiveTextSelection(null);
+                setShowFormatterSidebar(false);
+              }}
+            />
+          </div>
+        )}
       </div>
-      
+
       {/* Footer Info */}
       <div className="bg-black/90 border-t border-gray-800 p-1 px-4 text-xs text-gray-600 flex justify-between z-40 relative">
          <span>Kurdish PDF Editor v2.2 (AI Powered)</span>
