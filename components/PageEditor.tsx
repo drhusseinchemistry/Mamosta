@@ -666,6 +666,57 @@ const PageEditor: React.FC<PageEditorProps> = ({
     }
   };
 
+  const handleGroupDirectionToolbar = (dir: 'rtl' | 'ltr') => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+    const activeObj = canvas.getActiveObject();
+    if (!activeObj) return;
+
+    // Get all items in the selection/group
+    const items = activeObj.getObjects ? activeObj.getObjects() : [activeObj];
+    
+    // 1. Mirror horizontal position of items inside the group if there are multiple items
+    if (items.length > 1) {
+      items.forEach((item: any) => {
+        if (item.left !== undefined) {
+          item.set('left', -item.left);
+        }
+        
+        // 2. Mirror arrow orientations and shapes
+        if (item.angle !== undefined) {
+          const newAngle = (180 - item.angle + 360) % 360;
+          item.set('angle', newAngle);
+        }
+      });
+    }
+
+    // 3. For any text item, change its text alignment, direction, and fontFamily
+    const applyDirectionToText = (obj: any) => {
+      if (obj.type === 'i-text' || obj.type === 'text' || obj.type === 'textbox') {
+        obj.set({
+          textAlign: dir === 'rtl' ? 'right' : 'left',
+          fontFamily: dir === 'rtl' ? 'Noto Sans Arabic, Inter, sans-serif' : 'Inter, sans-serif'
+        });
+        if (typeof obj.initDimensions === 'function') {
+          obj.initDimensions();
+        }
+        obj.dirty = true;
+      } else if (obj.getObjects) {
+        obj.getObjects().forEach((sub: any) => applyDirectionToText(sub));
+      }
+    };
+
+    items.forEach((item: any) => {
+      applyDirectionToText(item);
+    });
+
+    if (activeObj.type === 'group') {
+      activeObj.dirty = true;
+    }
+    canvas.renderAll();
+    onModified();
+  };
+
   const handleEditFractionGroup = (targetGroup?: any) => {
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
@@ -1141,17 +1192,84 @@ const PageEditor: React.FC<PageEditorProps> = ({
         if (obj.type === 'i-text' || obj.type === 'textbox') {
           obj.editable = false;
         }
+        if (obj.type === 'textbox') {
+          obj.setControlsVisibility({
+            mt: false,
+            mb: false
+          });
+        }
+        if (['rect', 'circle', 'ellipse', 'triangle', 'polygon', 'polyline', 'line', 'path'].includes(obj.type)) {
+          obj.set({ strokeUniform: true });
+        }
         if (obj.type === 'group') {
           obj.getObjects().forEach((child: any) => {
             if (child.type === 'i-text' || child.type === 'textbox') {
               child.editable = false;
+            }
+            if (child.type === 'textbox') {
+              child.setControlsVisibility({
+                mt: false,
+                mb: false
+              });
+            }
+            if (['rect', 'circle', 'ellipse', 'triangle', 'polygon', 'polyline', 'line', 'path'].includes(child.type)) {
+              child.set({ strokeUniform: true });
             }
           });
         }
       }
       onModified();
     });
-    canvas.on('object:modified', onModified);
+
+    const adjustTextboxScaling = (obj: any) => {
+      if (!obj || obj.type !== 'textbox') return;
+      const scaleX = obj.scaleX || 1;
+      const scaleY = obj.scaleY || 1;
+      if (scaleX !== 1 || scaleY !== 1) {
+        const newWidth = Math.max(obj.width * scaleX, 10);
+        // Check if it's scaled proportionally (corners) or non-proportionally (sides)
+        const isCorner = Math.abs(scaleX - scaleY) < 0.05;
+        if (isCorner) {
+          const newFontSize = Math.max(Math.round((obj.fontSize || 20) * scaleY), 4);
+          obj.set({
+            width: newWidth,
+            fontSize: newFontSize,
+            scaleX: 1,
+            scaleY: 1
+          });
+        } else {
+          obj.set({
+            width: newWidth,
+            scaleX: 1,
+            scaleY: 1
+          });
+        }
+        if (typeof obj.initDimensions === 'function') {
+          obj.initDimensions();
+        }
+        obj.dirty = true;
+      }
+    };
+
+    const handleObjectModified = (opt: any) => {
+      const obj = opt.target;
+      if (obj && obj.type === 'textbox') {
+        adjustTextboxScaling(obj);
+        canvas.renderAll();
+      }
+      onModified();
+    };
+
+    const handleObjectScaling = (opt: any) => {
+      const obj = opt.target;
+      if (obj && obj.type === 'textbox') {
+        adjustTextboxScaling(obj);
+        canvas.renderAll();
+      }
+    };
+
+    canvas.on('object:modified', handleObjectModified);
+    canvas.on('object:scaling', handleObjectScaling);
     canvas.on('object:removed', onModified);
     canvas.on('path:created', onModified);
 
@@ -1262,9 +1380,10 @@ const PageEditor: React.FC<PageEditorProps> = ({
             const absTop = groupTop + (item.top * groupScaleY);
 
             if (item.type === 'i-text' || item.type === 'textbox') {
-              const newItem = new window.fabric.IText(item.text || '', {
+              const newItem = new window.fabric.Textbox(item.text || '', {
                 left: absLeft,
                 top: absTop,
+                width: (item.width || 250) * groupScaleX,
                 fontSize: (item.fontSize || 20) * groupScaleY,
                 fill: item.fill || '#1f2937',
                 fontFamily: item.fontFamily || 'Noto Sans Arabic, Inter, sans-serif',
@@ -1275,6 +1394,8 @@ const PageEditor: React.FC<PageEditorProps> = ({
                 originY: item.originY || 'top',
                 hasControls: true,
                 editable: false,
+                splitByGrapheme: true,
+                minWidth: 10
               });
               canvas.add(newItem);
               addedItems.push(newItem);
@@ -1589,14 +1710,16 @@ const PageEditor: React.FC<PageEditorProps> = ({
         // Text Tool Logic
         if (activeTool === 'text') {
             if (!target) {
-                const text = new window.fabric.IText('بنڤیسە', {
+                const text = new window.fabric.Textbox('بنڤیسە', {
                     left: pointer.x,
                     top: pointer.y,
+                    width: 250,
                     fill: strokeColor,
-                    fontSize: strokeWidth * 4,
+                    fontSize: 14,
                     fontFamily: 'Noto Sans Arabic',
-                    direction: 'rtl',
-                    textAlign: 'right'
+                    textAlign: 'right',
+                    splitByGrapheme: true,
+                    minWidth: 10
                 });
                 canvas.add(text);
                 canvas.setActiveObject(text);
@@ -1621,6 +1744,7 @@ const PageEditor: React.FC<PageEditorProps> = ({
                     fill: 'transparent',
                     stroke: strokeColor,
                     strokeWidth: strokeWidth,
+                    strokeUniform: true,
                     selectable: false
                 });
             } else if (activeTool === 'circle') {
@@ -1630,12 +1754,14 @@ const PageEditor: React.FC<PageEditorProps> = ({
                     fill: 'transparent',
                     stroke: strokeColor,
                     strokeWidth: strokeWidth,
+                    strokeUniform: true,
                     selectable: false
                 });
             } else if (activeTool === 'line') {
                 activeShape = new window.fabric.Line([shapeStart.x, shapeStart.y, shapeStart.x, shapeStart.y], {
                     stroke: strokeColor,
                     strokeWidth: strokeWidth,
+                    strokeUniform: true,
                     selectable: false
                 });
             }
@@ -1830,8 +1956,32 @@ const PageEditor: React.FC<PageEditorProps> = ({
             </button>
           )}
 
+          {/* RTL Button (Only shown when a group or selection is active) */}
+          {activeTextObject && (
+            <button
+              onClick={() => handleGroupDirectionToolbar('rtl')}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-purple-800 bg-purple-950/95 text-purple-200 hover:bg-purple-800 hover:text-white shadow-lg text-[10px] font-black transition-all duration-150 active:scale-95 whitespace-nowrap"
+              title="ڕاست بۆ چەپ و ئاوێتەکردنی شوێنەکان (RTL & Mirror Layout)"
+            >
+              <Icons.ArrowLeftToLine size={12} className="text-purple-400" />
+              <span>RTL</span>
+            </button>
+          )}
+
+          {/* LTR Button (Only shown when a group or selection is active) */}
+          {activeTextObject && (
+            <button
+              onClick={() => handleGroupDirectionToolbar('ltr')}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-pink-800 bg-pink-950/95 text-pink-200 hover:bg-pink-800 hover:text-white shadow-lg text-[10px] font-black transition-all duration-150 active:scale-95 whitespace-nowrap"
+              title="چەپ بۆ ڕاست و ئاوێتەکردنی شوێنەکان (LTR & Mirror Layout)"
+            >
+              <Icons.ArrowRightToLine size={12} className="text-pink-400" />
+              <span>LTR</span>
+            </button>
+          )}
+
           {/* Direct Edit / Keyboard Button */}
-          {activeTextObject && (activeTextObject.type === 'i-text' || activeTextObject.type === 'text' || activeTextObject.isType?.('i-text') || activeTextObject.isType?.('text')) && (
+          {activeTextObject && (activeTextObject.type === 'i-text' || activeTextObject.type === 'text' || activeTextObject.type === 'textbox' || activeTextObject.isType?.('i-text') || activeTextObject.isType?.('text') || activeTextObject.isType?.('textbox')) && (
             <button
               onClick={() => {
                 if (activeTextObject && typeof activeTextObject.enterEditing === 'function') {
@@ -1905,8 +2055,27 @@ const PageEditor: React.FC<PageEditorProps> = ({
             </button>
           )}
 
+          {/* Edit / Format Button for Shapes, Lines, Paths, Groups (opens sidebar formatter) */}
+          {activeTextObject && !(activeTextObject.type === 'i-text' || activeTextObject.type === 'text' || activeTextObject.type === 'textbox' || activeTextObject.isFractionGroup || activeTextObject.isMathSymbolGroup || activeTextObject.isTable) && (
+            <button
+              onClick={() => {
+                if (onOpenFormatter) onOpenFormatter();
+              }}
+              className={`
+                flex items-center gap-1.5 px-3 py-1.5 rounded-full border shadow-lg text-[10px] font-black transition-all duration-150 active:scale-95 whitespace-nowrap
+                ${showFormatterSidebar 
+                  ? 'bg-emerald-600 text-white border-emerald-500 shadow-emerald-500/20' 
+                  : 'border-emerald-800 bg-emerald-950/95 text-emerald-200 hover:bg-emerald-800 hover:text-white'}
+              `}
+              title="دەستکاری و ڕێکخستنا شێوەی (Edit & Format Shape)"
+            >
+              <Icons.Edit size={12} className="text-emerald-400 animate-pulse" />
+              <span>دەستکاری (Format)</span>
+            </button>
+          )}
+
           {/* Text Formatting Button (Only shown for text objects) */}
-          {activeTextObject && (activeTextObject.type === 'i-text' || activeTextObject.type === 'text') && (
+          {activeTextObject && (activeTextObject.type === 'i-text' || activeTextObject.type === 'text' || activeTextObject.type === 'textbox') && (
             <button
               onClick={() => {
                 if (onOpenFormatter) onOpenFormatter();

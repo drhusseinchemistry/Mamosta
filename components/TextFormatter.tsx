@@ -26,8 +26,9 @@ const PRESET_COLORS = [
 
 export const TextFormatter: React.FC<TextFormatterProps> = ({ canvas, activeObject, onModified, onClose }) => {
   // Identify object types
-  const isText = activeObject && (activeObject.type === 'i-text' || activeObject.type === 'text');
-  const isPathOrLine = activeObject && (activeObject.type === 'path' || activeObject.type === 'line' || activeObject.type === 'polyline' || activeObject.type === 'rect' || activeObject.type === 'circle');
+  const isText = activeObject && (activeObject.type === 'i-text' || activeObject.type === 'text' || activeObject.type === 'textbox');
+  const isPathOrLine = activeObject && (activeObject.type === 'path' || activeObject.type === 'line' || activeObject.type === 'polyline' || activeObject.type === 'rect' || activeObject.type === 'circle' || activeObject.type === 'ellipse');
+  const isGroup = activeObject && (activeObject.type === 'group' || activeObject.type === 'activeSelection');
 
   // Sync state with Fabric Object properties
   const [fontFamily, setFontFamily] = useState('Noto Sans Arabic');
@@ -46,10 +47,85 @@ export const TextFormatter: React.FC<TextFormatterProps> = ({ canvas, activeObje
   const [hasNeon, setHasNeon] = useState(false);
   const [hasOutline, setHasOutline] = useState(false);
 
+  // Shape and Border Style States
+  const [strokeWidth, setStrokeWidth] = useState(2);
+  const [cornerRadius, setCornerRadius] = useState(0);
+  const [strokeStyle, setStrokeStyle] = useState<'solid' | 'dashed' | 'dotted'>('solid');
+  const [fillColor, setFillColor] = useState('transparent');
+
   // AI Assistant States
   const [aiPrompt, setAiPrompt] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState('');
+
+  const handleGroupDirection = (dir: 'rtl' | 'ltr') => {
+    if (!activeObject) return;
+    const items = activeObject.getObjects ? activeObject.getObjects() : [activeObject];
+    items.forEach((item: any) => {
+      if (item.type === 'i-text' || item.type === 'text' || item.type === 'textbox') {
+        item.set({
+          textAlign: dir === 'rtl' ? 'right' : 'left',
+          fontFamily: dir === 'rtl' ? 'Noto Sans Arabic' : 'Inter'
+        });
+        if (typeof item.initDimensions === 'function') {
+          item.initDimensions();
+        }
+        item.dirty = true;
+      } else if (item.getObjects) {
+        // Recursive for nested groups
+        const subItems = item.getObjects();
+        subItems.forEach((sub: any) => {
+          if (sub.type === 'i-text' || sub.type === 'text' || sub.type === 'textbox') {
+            sub.set({
+              textAlign: dir === 'rtl' ? 'right' : 'left',
+              fontFamily: dir === 'rtl' ? 'Noto Sans Arabic' : 'Inter'
+            });
+            if (typeof sub.initDimensions === 'function') {
+              sub.initDimensions();
+            }
+            sub.dirty = true;
+          }
+        });
+      }
+    });
+    if (activeObject.type === 'group') {
+      activeObject.dirty = true;
+    }
+    canvas.renderAll();
+    onModified();
+  };
+
+  const handleMirrorGroupHorizontal = () => {
+    if (!activeObject) return;
+    const items = activeObject.getObjects ? activeObject.getObjects() : [activeObject];
+    if (items.length <= 1) return;
+
+    // Calculate bounding box of items inside the group
+    const lefts = items.map((item: any) => item.left || 0);
+    const minLeft = Math.min(...lefts);
+    const maxLeft = Math.max(...lefts);
+    const sumLeft = minLeft + maxLeft;
+
+    items.forEach((item: any) => {
+      // Reverse horizontal position
+      const currentLeftVal = item.left || 0;
+      item.set('left', sumLeft - currentLeftVal);
+      
+      // Mirror arrows
+      if (item.type === 'group' || item.type === 'activeSelection') {
+        // can recurse or do sub-item mirror if needed, but reversing is generally enough
+      } else if (item.angle !== undefined) {
+        if (item.angle === 90) item.set('angle', 270);
+        else if (item.angle === 270) item.set('angle', 90);
+      }
+    });
+
+    if (activeObject.type === 'group') {
+      activeObject.dirty = true;
+    }
+    canvas.renderAll();
+    onModified();
+  };
 
   const handleAIImprove = async () => {
     if (!activeObject || !isText) return;
@@ -171,6 +247,23 @@ export const TextFormatter: React.FC<TextFormatterProps> = ({ canvas, activeObje
         // For drawing paths, lines, shapes, use stroke color as main color
         setColorValue(activeObject.stroke || activeObject.fill || '#000000');
       }
+
+      // Sync shape and border properties
+      setStrokeWidth(activeObject.strokeWidth || 2);
+      if (activeObject.type === 'rect') {
+        setCornerRadius(activeObject.rx || 0);
+      }
+      
+      const dashArray = activeObject.strokeDashArray;
+      if (!dashArray || dashArray.length === 0) {
+        setStrokeStyle('solid');
+      } else if (dashArray[0] > 5) {
+        setStrokeStyle('dashed');
+      } else {
+        setStrokeStyle('dotted');
+      }
+      
+      setFillColor(activeObject.fill || 'transparent');
       setOpacity(activeObject.opacity !== undefined ? activeObject.opacity : 1);
     };
 
@@ -191,6 +284,48 @@ export const TextFormatter: React.FC<TextFormatterProps> = ({ canvas, activeObje
     activeObject.set(key, value);
     canvas.renderAll();
     onModified();
+  };
+
+  const handleCornerRadiusChange = (radius: number) => {
+    setCornerRadius(radius);
+    if (activeObject && activeObject.type === 'rect') {
+      activeObject.set({ rx: radius, ry: radius });
+      canvas.renderAll();
+      onModified();
+    }
+  };
+
+  const handleStrokeWidthChange = (width: number) => {
+    setStrokeWidth(width);
+    if (activeObject) {
+      activeObject.set({ strokeWidth: width });
+      canvas.renderAll();
+      onModified();
+    }
+  };
+
+  const handleStrokeDashChange = (style: 'solid' | 'dashed' | 'dotted') => {
+    setStrokeStyle(style);
+    if (activeObject) {
+      let dashArray: number[] | null = null;
+      if (style === 'dashed') {
+        dashArray = [12, 6];
+      } else if (style === 'dotted') {
+        dashArray = [3, 4];
+      }
+      activeObject.set({ strokeDashArray: dashArray });
+      canvas.renderAll();
+      onModified();
+    }
+  };
+
+  const handleFillColorChange = (color: string) => {
+    setFillColor(color);
+    if (activeObject) {
+      activeObject.set({ fill: color });
+      canvas.renderAll();
+      onModified();
+    }
   };
 
   const handleFontChange = (fontName: string) => {
@@ -251,7 +386,18 @@ export const TextFormatter: React.FC<TextFormatterProps> = ({ canvas, activeObje
 
   const handleDirectionChange = (direction: 'ltr' | 'rtl') => {
     setTextDirection(direction);
-    updateProperty('direction', direction);
+    if (activeObject) {
+      activeObject.set({
+        textAlign: direction === 'rtl' ? 'right' : 'left',
+        fontFamily: direction === 'rtl' ? 'Noto Sans Arabic' : 'Inter'
+      });
+      if (typeof activeObject.initDimensions === 'function') {
+        activeObject.initDimensions();
+      }
+      activeObject.dirty = true;
+      canvas.renderAll();
+      onModified();
+    }
   };
 
   const toggleCase = () => {
@@ -531,7 +677,7 @@ export const TextFormatter: React.FC<TextFormatterProps> = ({ canvas, activeObje
         <div className="flex items-center gap-1.5">
           <Icons.Sliders size={11} className="text-indigo-400 animate-pulse" />
           <span className="font-black text-[10px] text-zinc-200 tracking-wider uppercase">
-            {isText ? 'ڕێکخستنا دەقی' : 'تایبەتمەندی'}
+            {isText ? 'ڕێکخستنا دەقی' : isGroup ? 'ڕێکخستنا گروپی' : 'تایبەتمەندی'}
           </span>
         </div>
       </div>
@@ -924,6 +1070,43 @@ export const TextFormatter: React.FC<TextFormatterProps> = ({ canvas, activeObje
           </>
         )}
 
+        {/* GROUP SPECIFIC CONTROLS */}
+        {isGroup && (
+          <div className="space-y-3 border-b border-zinc-900 pb-3 bg-indigo-950/10 p-2.5 rounded-xl border border-indigo-500/10">
+            <span className="text-[9px] text-indigo-400 font-black uppercase tracking-wider block text-right flex items-center justify-end gap-1">
+              <span>ڕێکخستنا ئاراستەیا گروپی (Group Direction)</span>
+              <Icons.Sparkles size={10} className="text-indigo-400 animate-pulse" />
+            </span>
+            
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={() => handleGroupDirection('rtl')}
+                className="h-8 flex items-center justify-center gap-1.5 bg-zinc-900 hover:bg-zinc-850 border border-zinc-800 hover:border-indigo-500/50 text-white font-extrabold rounded-lg text-[10px] transition-all duration-150 active:scale-95 shadow-sm"
+                title="گۆڕینی هەموو دەقەکانی ناو گروپ بۆ RTL"
+              >
+                <span className="font-mono text-[9px]">← RTL</span>
+              </button>
+              
+              <button
+                onClick={() => handleGroupDirection('ltr')}
+                className="h-8 flex items-center justify-center gap-1.5 bg-zinc-900 hover:bg-zinc-850 border border-zinc-800 hover:border-indigo-500/50 text-white font-extrabold rounded-lg text-[10px] transition-all duration-150 active:scale-95 shadow-sm"
+                title="گۆڕینی هەموو دەقەکانی ناو گروپ بۆ LTR"
+              >
+                <span className="font-mono text-[9px]">LTR ➔</span>
+              </button>
+            </div>
+
+            <button
+              onClick={handleMirrorGroupHorizontal}
+              className="w-full h-8 flex items-center justify-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-black rounded-lg text-[10px] transition-all duration-150 active:scale-95 shadow-md shadow-indigo-500/10"
+              title="ئاوێتەکردنی شوێنی ئاسۆیی توخمەکان لەناو گروپەکەدا"
+            >
+              <Icons.MoveHorizontal size={11} className="text-indigo-200" />
+              <span>ئاوێتەکرنا جهێن ئاسۆیی (Mirror Layout)</span>
+            </button>
+          </div>
+        )}
+
         {/* 3: COLOR ACCENTS (For both Text and Path/Lines) */}
         {(isText || isPathOrLine) && (
           <div className="space-y-2 border-b border-zinc-900 pb-3">
@@ -949,6 +1132,99 @@ export const TextFormatter: React.FC<TextFormatterProps> = ({ canvas, activeObje
                   className="w-6 h-6 opacity-0 cursor-pointer absolute"
                   title="ڕەنگەکێ تر (Custom Color)"
                 />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* SHAPE & BORDER STYLE CONTROLS */}
+        {isPathOrLine && (
+          <div className="space-y-3 border-b border-zinc-900 pb-3 bg-zinc-900/10 p-2.5 rounded-xl border border-zinc-850">
+            <span className="text-[9px] text-indigo-400 font-black uppercase tracking-wider block text-right border-r-2 border-indigo-500 pr-1.5 flex items-center justify-end gap-1">
+              <span>شێوازێ چوارچوڤە و شێوەی (Shape Style)</span>
+            </span>
+
+            {/* Stroke Width Slider */}
+            <div className="space-y-1">
+              <div className="flex justify-between text-[8.5px] text-zinc-400 font-bold">
+                <span className="font-mono text-indigo-300">{strokeWidth}px</span>
+                <span>ستووراهیا چوارچوڤەی (Stroke Weight)</span>
+              </div>
+              <input
+                type="range"
+                min="1"
+                max="25"
+                step="1"
+                value={strokeWidth}
+                onChange={(e) => handleStrokeWidthChange(Number(e.target.value))}
+                className="w-full accent-indigo-500 h-1 bg-zinc-800 rounded-lg cursor-pointer transition-all"
+              />
+            </div>
+
+            {/* Corner Radius (Only for Rectangles) */}
+            {activeObject.type === 'rect' && (
+              <div className="space-y-1">
+                <div className="flex justify-between text-[8.5px] text-zinc-400 font-bold">
+                  <span className="font-mono text-indigo-300">{cornerRadius}px</span>
+                  <span>گۆشەیێن بازنەیی (Corner Rounding)</span>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value={cornerRadius}
+                  onChange={(e) => handleCornerRadiusChange(Number(e.target.value))}
+                  className="w-full accent-indigo-500 h-1 bg-zinc-800 rounded-lg cursor-pointer transition-all"
+                />
+              </div>
+            )}
+
+            {/* Border Dash Styles */}
+            <div className="space-y-1.5">
+              <span className="text-[8.5px] text-zinc-400 font-bold block text-right">شێوازێ هێڵێ (Line Style)</span>
+              <div className="grid grid-cols-3 gap-1">
+                <button
+                  onClick={() => handleStrokeDashChange('solid')}
+                  className={`h-7 rounded text-[8px] font-bold border transition-all ${strokeStyle === 'solid' ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white'}`}
+                >
+                  سادە (Solid)
+                </button>
+                <button
+                  onClick={() => handleStrokeDashChange('dashed')}
+                  className={`h-7 rounded text-[8px] font-bold border transition-all ${strokeStyle === 'dashed' ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white'}`}
+                >
+                  قەتیعە (Dashed)
+                </button>
+                <button
+                  onClick={() => handleStrokeDashChange('dotted')}
+                  className={`h-7 rounded text-[8px] font-bold border transition-all ${strokeStyle === 'dotted' ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white'}`}
+                >
+                  خال (Dotted)
+                </button>
+              </div>
+            </div>
+
+            {/* Fill Color selection */}
+            <div className="space-y-1.5">
+              <span className="text-[8.5px] text-zinc-400 font-bold block text-right">رەنگێ ناڤبەرێ (Fill Color)</span>
+              <div className="flex flex-wrap gap-1 bg-zinc-900/40 border border-zinc-900/60 rounded-lg p-1 justify-center">
+                <button
+                  onClick={() => handleFillColorChange('transparent')}
+                  className={`px-1.5 h-4.5 rounded text-[7.5px] font-black border transition-all ${fillColor === 'transparent' ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-zinc-900 border-zinc-800 text-zinc-400'}`}
+                  title="بێ ڕەنگ (Transparent)"
+                >
+                  بێ ڕەنگ
+                </button>
+                {PRESET_COLORS.map(c => (
+                  <button
+                    key={'fill-' + c}
+                    onClick={() => handleFillColorChange(c)}
+                    className={`w-3.5 h-3.5 rounded-full border border-white/10 transition-all duration-150 relative ${fillColor === c ? 'scale-110 ring-1 ring-indigo-500 ring-offset-1 ring-offset-zinc-950 border-white' : 'hover:scale-110'}`}
+                    style={{ backgroundColor: c }}
+                    title={c}
+                  />
+                ))}
               </div>
             </div>
           </div>

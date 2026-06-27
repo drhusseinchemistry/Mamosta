@@ -426,7 +426,10 @@ Return a JSON object with a single root array called "elements":
       "height": number, // optional, for rectangles
       "strokeWidth": number, // optional, for line/shape elements (default 2)
       "fontSize": number, // optional (defaults to 14)
-      "color": string // optional, specify CSS color or hex color if specified/colored (e.g., "#ef4444" for red, "#3b82f6" for blue, etc.)
+      "color": string, // optional, specify CSS color or hex color if specified/colored (e.g., "#ef4444" for red, "#3b82f6" for blue, etc.)
+      "x": number, // optional, X-offset relative to canvas center (ranges from -450 to 450)
+      "y": number, // optional, Y-offset relative to canvas center (ranges from -300 to 300)
+      "angle": number // optional, rotation angle in degrees (e.g. 0, 45, 90, 135, 180, 225, 270, 315)
     }
   ]
 }
@@ -445,6 +448,19 @@ RECREATION & LAYOUT RULES:
 11. Squares / Rectangles: If there are visual boxes, cards, square outlines (چوارگوشە), or rectangle containers (لاکێشا) in the diagram or question, represent them using {"type": "square", "width": 50, "color": "#10b981"} or {"type": "rectangle", "width": 100, "height": 40, "color": "#ef4444"}.
 12. Diagrams/Illustrations/Images: If there is an illustration, drawing, cell, heart, brain, beaker, or geometric diagram in the question, represent it elegantly using {"type": "image_icon", "text": "🫀", "fontSize": 42} (choose the most contextually relevant aesthetic emoji, e.g. 🫀 for biology heart, 🧠 for brain, 🧬 for genetics, 🧪/🔬 for science, 📐/📊 for math diagrams).
 13. Plain symbols or constants (e.g., "+", "-", "=", "x", "y", "2") can be grouped into sequential 'text' elements.
+14. FOR TREE STRUCTURES, FLOWCHARTS, BRANCHING DIAGRAMS, OR COMPLEX SCHEMAS (such as the hierarchical tree classification of Matter / ماددە):
+    - You MUST specify "x", "y", and "angle" properties on EVERY element to lay them out in a beautiful branching tree or flowchart format.
+    - Top Node: Place a "rectangle" at x: 0, y: -220, and a "text" element at x: 0, y: -220.
+    - Arrow from Top Node: Place an "arrow" pointing straight down at x: 0, y: -160, with angle: 90.
+    - Middle Node: Place a "rectangle" at x: 0, y: -100, and a "text" element at x: 0, y: -100.
+    - Diverging Branches:
+      - Left Branch Arrow (pointing diagonally down-left): Place an "arrow" at x: -140, y: -40, with angle: 145.
+      - Left Branch Label (e.g., "بەلێ"): Place a "text" element at x: -150, y: -50.
+      - Right Branch Arrow (pointing diagonally down-right): Place an "arrow" at x: 140, y: -40, with angle: 35.
+      - Right Branch Label (e.g., "نەخێر"): Place a "text" element at x: 150, y: -50.
+    - Level 3 left box/text node: Place a "rectangle" and "text" element at x: -250, y: 30.
+    - Level 3 right box/text node: Place a "rectangle" and "text" element at x: 250, y: 30.
+    - Use this beautiful hierarchical coordinate pattern for all child boxes, diagonal arrows, and labels so they form parallel branches mirroring the original diagram structure perfectly!
 
 CRITICAL: Return ONLY valid, minified JSON matching the schema above. Do NOT wrap it in markdown codeblocks (no \`\`\`json ... \`\`\`), do NOT write any introductory or conversational text. Return only the JSON string starting with { and ending with }.`;
 
@@ -490,4 +506,95 @@ const blobToBase64 = (blob: Blob): Promise<string> => {
     reader.onerror = reject;
     reader.readAsDataURL(blob);
   });
+};
+
+export const troubleshootPage = async (
+  apiKey: string,
+  elements: any[],
+  instruction: string
+): Promise<string> => {
+  const hasServer = await checkServerConfig();
+  if (hasServer) {
+    try {
+      const res = await fetch("/api/troubleshoot-page", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          elements,
+          instruction
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        return data.text || "";
+      } else {
+        const errData = await res.json();
+        throw new Error(errData.error || "Server troubleshooting error");
+      }
+    } catch (err) {
+      console.warn("Server troubleshooting failed, falling back to client-side:", err);
+    }
+  }
+
+  const cleanKey = resolveApiKey(apiKey);
+  if (!cleanKey) throw new Error("تکایە سەرەتا API Key دابنێ");
+
+  try {
+    const ai = new GoogleGenAI({ apiKey: cleanKey });
+    const systemPrompt = `You are an expert AI educational content designer, layout organizer, and troubleshooting engine.
+You are given a JSON list of vector educational/canvas objects (textboxes, lines, shapes, math/chemistry structures) currently rendered on a workspace.
+The user wants you to modify, correct, rearrange, and fix this page based on their instruction.
+
+User Instruction: "${instruction || 'Fix and arrange the page elements'}"
+
+CRITICAL GOALS & RULES:
+1. Parse and understand the layout. Elements have:
+   - x, y: coordinate offsets relative to canvas center (ranges from -450 to 450 for x, and -300 to 300 for y)
+   - type: "text" | "fraction" | "sigma_sum" | "product" | "definite_integral" | "limit" | "newline" | "line" | "image_icon" | "arrow" | "square" | "rectangle"
+   - text, numerator, denominator, topText, bottomText, color, fontSize, angle, width, height, etc.
+2. Carefully troubleshoot and correct:
+   - Spelling, vocabulary, and phrasing errors in Kurdish (Badini/Sorani Arabic script), Arabic, or English text. Double-check all Bahdini Kurdish letters ('ڤ', 'چ', 'پ', 'گ', 'ژ', 'ێ', 'ۆ', 'ڕ', 'ڵ'). For example, change any misspelled words to pure, standard Bahdini Kurdish.
+   - Symmetrically align and position elements. If things are messy, overlap, or misaligned, adjust their x and y coordinates so they look like a premium, professional publication.
+   - Arrange diagrams, geometric shapes, flowcharts, or branching structures cleanly with parallel coordinate alignments.
+3. You are fully empowered to add new elements, delete unnecessary elements, edit text content, resize elements, or change layout coordinates.
+4. Return the entire corrected layout in the exact same JSON schema.
+
+JSON SCHEMA:
+Return a JSON object with a single root array called "elements":
+{
+  "elements": [
+    {
+      "type": "text" | "fraction" | "sigma_sum" | "product" | "definite_integral" | "limit" | "newline" | "line" | "image_icon" | "arrow" | "square" | "rectangle",
+      "text": "plain text string",
+      "numerator": "fraction numerator",
+      "denominator": "fraction denominator",
+      "topText": "upper limit",
+      "bottomText": "lower limit",
+      "width": number,
+      "height": number,
+      "strokeWidth": number,
+      "fontSize": number,
+      "color": string,
+      "x": number,
+      "y": number,
+      "angle": number
+    }
+  ]
+}
+
+CURRENT ELEMENTS ON CANVAS:
+${JSON.stringify(elements || [], null, 2)}
+
+CRITICAL: Return ONLY valid, minified JSON matching the schema above. Do NOT wrap it in markdown codeblocks (no \`\`\`json ... \`\`\`), do NOT write any introductory or conversational text. Return only the JSON string starting with { and ending with }.`;
+
+    const response = await ai.models.generateContent({
+      model: activeModel,
+      contents: systemPrompt,
+    });
+
+    return response.text || "";
+  } catch (error: any) {
+    handleError(error);
+    return "";
+  }
 };

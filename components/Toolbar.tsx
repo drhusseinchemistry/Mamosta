@@ -28,6 +28,7 @@ interface ToolbarProps {
   onAddElement: (type: string) => void;
   onAddMathSymbol: (type: string) => void;
   onAIParseMath?: (file: File, instruction: string) => Promise<void>;
+  onTroubleshootPage?: (instruction: string) => Promise<void>;
 }
 
 const ToolButton: React.FC<{
@@ -80,7 +81,8 @@ const Toolbar: React.FC<ToolbarProps> = ({
   iconSize = 18,
   onAddElement,
   onAddMathSymbol,
-  onAIParseMath
+  onAIParseMath,
+  onTroubleshootPage
 }) => {
   const [showElementsDropdown, setShowElementsDropdown] = React.useState(false);
   const [showMathDropdown, setShowMathDropdown] = React.useState(false);
@@ -89,8 +91,10 @@ const Toolbar: React.FC<ToolbarProps> = ({
   const [asilaFile, setAsilaFile] = React.useState<File | null>(null);
   const [aiInstruction, setAiInstruction] = React.useState('ڤێ پرسیارا بیرکاری یا د ڤی وێنەی دا ب دروستی بنڤیسەڤە');
   const [asilaInstruction, setAsilaInstruction] = React.useState('ڤێ پرسیارێ ب دروستی بنڤیسەڤە و بۆکس بکە');
+  const [charInstruction, setCharInstruction] = React.useState('ڤێ لاپەرێ بومن رێک پێخە تایبەت هێلکاریێ و پرسیارێن بیرکاری و کیمیایێ و ئەگەر پەیڤەک یان رستەک یا خەلەت بیتن چارەسەر بکە');
   const [isAiProcessing, setIsAiProcessing] = React.useState(false);
   const [isAsilaProcessing, setIsAsilaProcessing] = React.useState(false);
+  const [isCharProcessing, setIsCharProcessing] = React.useState(false);
 
   const handleAiFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -103,6 +107,18 @@ const Toolbar: React.FC<ToolbarProps> = ({
     const file = e.target.files?.[0];
     if (file) {
       setAsilaFile(file);
+    }
+  };
+
+  const handleRunChar = async () => {
+    if (!onTroubleshootPage || !charInstruction.trim()) return;
+    setIsCharProcessing(true);
+    try {
+      await onTroubleshootPage(charInstruction);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsCharProcessing(false);
     }
   };
 
@@ -778,6 +794,33 @@ const Toolbar: React.FC<ToolbarProps> = ({
              </div>
 
             <div className="w-px h-6 bg-white/10 mx-1"></div>
+
+              {/* Char - Troubleshooting Box next to Asila */}
+              <div className="flex items-center gap-1.5 bg-sky-950/20 border border-sky-500/25 rounded-lg px-2 py-1 max-w-[280px]" title="چارەسەرکرنا ئاریشێن دناڤ لاپەرێ دا (char)">
+                <textarea
+                  value={charInstruction}
+                  onChange={(e) => setCharInstruction(e.target.value)}
+                  placeholder="داخوازیا چارەسەرکرنێ بنڤیسە..."
+                  className="bg-transparent border-none text-[10px] text-gray-200 outline-none w-[175px] h-[32px] resize-none overflow-y-auto scrollbar-none text-right focus:ring-0 leading-tight focus:outline-none"
+                  dir="rtl"
+                />
+                <button
+                  onClick={handleRunChar}
+                  disabled={isCharProcessing}
+                  title="جێبەجێکرن (char)"
+                  className={`
+                    flex flex-col items-center justify-center p-1 rounded-md transition-all duration-200 min-w-[2.2rem] h-[28px]
+                    ${isCharProcessing 
+                      ? 'bg-sky-500/20 text-sky-400 animate-pulse cursor-wait' 
+                      : 'bg-sky-500 hover:bg-sky-400 text-slate-950 hover:scale-105 active:scale-95 shadow-[0_0_8px_rgba(56,189,248,0.3)]'}
+                  `}
+                >
+                  <Icons.Sparkles size={11} className={isCharProcessing ? 'animate-spin' : ''} />
+                  <span className="text-[8px] font-extrabold uppercase tracking-wide mt-0.5">char</span>
+                </button>
+              </div>
+
+             <div className="w-px h-6 bg-white/10 mx-1"></div>
 
             {/* Color & Size Compact */}
            <div className="flex items-center gap-2 px-1">

@@ -51,6 +51,8 @@ import {
   Play,
   ArrowUpToLine,
   ArrowDownToLine,
+  ArrowLeftToLine,
+  ArrowRightToLine,
   ListOrdered,
   Group,
   Ungroup,
@@ -126,6 +128,8 @@ export const Icons = {
   Play: Play,
   ArrowUpToLine: ArrowUpToLine,
   ArrowDownToLine: ArrowDownToLine,
+  ArrowLeftToLine: ArrowLeftToLine,
+  ArrowRightToLine: ArrowRightToLine,
   ListOrdered: ListOrdered
 };
 

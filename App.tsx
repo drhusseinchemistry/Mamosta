@@ -6,7 +6,7 @@ import { createMathSymbolGroup } from './utils/mathSymbols';
 import { TextFormatter } from './components/TextFormatter';
 import { EditorState, PageData, ToolType } from './types';
 import { initializePDFJS, loadPDFDocument, renderPDFPageToDataURL } from './services/pdfService';
-import { transcribeAudio, performOCR, validateApiKey, lastValidationError, generateMathFromImage, checkServerConfig } from './services/geminiService';
+import { transcribeAudio, performOCR, validateApiKey, lastValidationError, generateMathFromImage, checkServerConfig, troubleshootPage } from './services/geminiService';
 import { Icons } from './components/Icon';
 
 const ThemeStyleInjector: React.FC<{ theme: string }> = ({ theme }) => {
@@ -424,9 +424,7 @@ const App: React.FC = () => {
 
       const elements = data.elements;
       const center = activeCanvas.getVpCenter();
-      let startLeft = center.x - 120;
-      let currentLeft = startLeft;
-      let currentTop = center.y - 80;
+      let currentTop = center.y - 120; // Start higher to fit multiple lines beautifully
       const textColor = editorState.strokeColor || '#1f2937';
       
       const addedObjects: any[] = [];
@@ -437,160 +435,405 @@ const App: React.FC = () => {
         return rtlRegex.test(text);
       };
 
-      for (const elem of elements) {
-        if (elem.type === 'newline') {
-          currentTop += 65;
-          currentLeft = startLeft;
-          continue;
+      // Split elements into lines based on 'newline' elements
+      const hasCoordinates = elements.some((elem: any) => elem.x !== undefined && elem.y !== undefined);
+
+      if (hasCoordinates) {
+        // Coordinate-based absolute/relative layout for diagrams/flowcharts
+        for (const elem of elements) {
+          if (elem.type === 'newline') continue;
+
+          const fSize = elem.fontSize || 14;
+          const elementColor = elem.color || textColor;
+          const angle = elem.angle !== undefined ? elem.angle : 0;
+          
+          // Coordinate positions relative to canvas center
+          const left = center.x + (elem.x || 0);
+          const top = center.y + (elem.y || 0);
+
+          if (elem.type === 'text') {
+            if (!elem.text) continue;
+            const isRtl = isRtlText(elem.text);
+            const textWidth = elem.width || Math.max(100, Math.min(350, (elem.text.length * fSize * 0.75) + 16));
+            const textObj = new window.fabric.Textbox(elem.text, {
+              left: left,
+              top: top,
+              width: textWidth,
+              fontSize: fSize,
+              fill: elementColor,
+              fontFamily: 'Noto Sans Arabic, Inter, sans-serif',
+              selectable: true,
+              originX: 'center',
+              originY: 'center',
+              textAlign: isRtl ? 'right' : 'left',
+              angle: angle,
+              splitByGrapheme: true,
+              minWidth: 10
+            });
+            activeCanvas.add(textObj);
+            addedObjects.push(textObj);
+          } else if (elem.type === 'line') {
+            const w = elem.width || 120;
+            const lineObj = new window.fabric.Line([-w/2, 0, w/2, 0], {
+              stroke: elementColor,
+              strokeWidth: elem.strokeWidth || 2,
+              selectable: true,
+              originX: 'center',
+              originY: 'center',
+              left: left,
+              top: top,
+              angle: angle
+            });
+            activeCanvas.add(lineObj);
+            addedObjects.push(lineObj);
+          } else if (elem.type === 'arrow') {
+            const w = elem.width || 80;
+            const arrowShaft = new window.fabric.Line([-w/2, 0, w/2 - 6, 0], {
+              stroke: elementColor,
+              strokeWidth: elem.strokeWidth || 3,
+              originX: 'center',
+              originY: 'center'
+            });
+            const arrowHead = new window.fabric.Triangle({
+              left: w/2 - 3,
+              top: 0,
+              width: 12,
+              height: 12,
+              fill: elementColor,
+              angle: 90,
+              originX: 'center',
+              originY: 'center'
+            });
+            const arrowGroup = new window.fabric.Group([arrowShaft, arrowHead], {
+              left: left,
+              top: top,
+              angle: angle,
+              selectable: true,
+              hasControls: true
+            });
+            activeCanvas.add(arrowGroup);
+            addedObjects.push(arrowGroup);
+          } else if (elem.type === 'square') {
+            const size = elem.width || elem.height || 40;
+            const squareObj = new window.fabric.Rect({
+              left: left,
+              top: top,
+              width: size,
+              height: size,
+              fill: 'transparent',
+              stroke: elementColor,
+              strokeWidth: elem.strokeWidth || 2,
+              strokeUniform: true,
+              selectable: true,
+              originX: 'center',
+              originY: 'center',
+              angle: angle
+            });
+            activeCanvas.add(squareObj);
+            addedObjects.push(squareObj);
+          } else if (elem.type === 'rectangle') {
+            const rw = elem.width || 60;
+            const rh = elem.height || 40;
+            const rectObj = new window.fabric.Rect({
+              left: left,
+              top: top,
+              width: rw,
+              height: rh,
+              fill: 'transparent',
+              stroke: elementColor,
+              strokeWidth: elem.strokeWidth || 2,
+              strokeUniform: true,
+              selectable: true,
+              originX: 'center',
+              originY: 'center',
+              angle: angle
+            });
+            activeCanvas.add(rectObj);
+            addedObjects.push(rectObj);
+          } else if (elem.type === 'image_icon') {
+            const emoji = elem.text || '🫀';
+            const iconObj = new window.fabric.IText(emoji, {
+              left: left,
+              top: top,
+              fontSize: elem.fontSize || 38,
+              selectable: true,
+              originX: 'center',
+              originY: 'center',
+              angle: angle
+            });
+            activeCanvas.add(iconObj);
+            addedObjects.push(iconObj);
+          } else {
+            const mathGroup = createMathSymbolGroup(
+              elem.type, 
+              left, 
+              top, 
+              textColor, 
+              {
+                numerator: elem.numerator,
+                denominator: elem.denominator,
+                topText: elem.topText,
+                bottomText: elem.bottomText,
+              }
+            );
+
+            if (mathGroup) {
+              mathGroup.set({
+                originX: 'center',
+                originY: 'center',
+                left: left,
+                top: top,
+                angle: angle
+              });
+              activeCanvas.add(mathGroup);
+              addedObjects.push(mathGroup);
+            }
+          }
+        }
+      } else {
+        const linesOfElements: any[][] = [[]];
+        for (const elem of elements) {
+          if (elem.type === 'newline') {
+            linesOfElements.push([]);
+          } else {
+            linesOfElements[linesOfElements.length - 1].push(elem);
+          }
         }
 
-        const fSize = elem.fontSize || 14; // Default font size of 14 as requested
-        const elementColor = elem.color || textColor;
-
-        if (elem.type === 'text') {
-          if (!elem.text) continue;
-          
-          const isRtl = isRtlText(elem.text);
-          const textObj = new window.fabric.IText(elem.text, {
-            left: currentLeft,
-            top: currentTop,
-            fontSize: fSize,
-            fill: elementColor,
-            fontFamily: 'Noto Sans Arabic, Inter, sans-serif',
-            selectable: true,
-            originX: 'left',
-            originY: 'center',
-            direction: isRtl ? 'rtl' : 'ltr',
-            textAlign: isRtl ? 'right' : 'left'
-          });
-          
-          activeCanvas.add(textObj);
-          addedObjects.push(textObj);
-          
-          const estWidth = (elem.text.length * fSize * 0.55) + 12;
-          currentLeft += estWidth;
-        } else if (elem.type === 'line') {
-          const w = elem.width || 120;
-          const lineObj = new window.fabric.Line([currentLeft, currentTop, currentLeft + w, currentTop], {
-            stroke: elementColor,
-            strokeWidth: elem.strokeWidth || 2,
-            selectable: true,
-            originX: 'left',
-            originY: 'center'
-          });
-          activeCanvas.add(lineObj);
-          addedObjects.push(lineObj);
-          currentLeft += w + 12;
-        } else if (elem.type === 'arrow') {
-          const w = elem.width || 80;
-          const arrowShaft = new window.fabric.Line([currentLeft, currentTop, currentLeft + w - 10, currentTop], {
-            stroke: elementColor,
-            strokeWidth: elem.strokeWidth || 3,
-            selectable: true,
-            originX: 'left',
-            originY: 'center'
-          });
-          const arrowHead = new window.fabric.Triangle({
-            left: currentLeft + w,
-            top: currentTop,
-            width: 12,
-            height: 12,
-            fill: elementColor,
-            angle: 90,
-            originX: 'center',
-            originY: 'center',
-            selectable: true
-          });
-          const arrowGroup = new window.fabric.Group([arrowShaft, arrowHead], {
-            selectable: true,
-            hasControls: true
-          });
-          activeCanvas.add(arrowGroup);
-          addedObjects.push(arrowGroup);
-          currentLeft += w + 12;
-        } else if (elem.type === 'square') {
-          const size = elem.width || elem.height || 40;
-          const squareObj = new window.fabric.Rect({
-            left: currentLeft,
-            top: currentTop - size/2,
-            width: size,
-            height: size,
-            fill: 'transparent',
-            stroke: elementColor,
-            strokeWidth: elem.strokeWidth || 2,
-            selectable: true
-          });
-          activeCanvas.add(squareObj);
-          addedObjects.push(squareObj);
-          currentLeft += size + 12;
-        } else if (elem.type === 'rectangle') {
-          const rw = elem.width || 60;
-          const rh = elem.height || 40;
-          const rectObj = new window.fabric.Rect({
-            left: currentLeft,
-            top: currentTop - rh/2,
-            width: rw,
-            height: rh,
-            fill: 'transparent',
-            stroke: elementColor,
-            strokeWidth: elem.strokeWidth || 2,
-            selectable: true
-          });
-          activeCanvas.add(rectObj);
-          addedObjects.push(rectObj);
-          currentLeft += rw + 12;
-        } else if (elem.type === 'image_icon') {
-          const emoji = elem.text || '🫀';
-          const iconObj = new window.fabric.IText(emoji, {
-            left: currentLeft,
-            top: currentTop,
-            fontSize: elem.fontSize || 38,
-            selectable: true,
-            originX: 'left',
-            originY: 'center',
-          });
-          activeCanvas.add(iconObj);
-          addedObjects.push(iconObj);
-          currentLeft += (elem.fontSize || 38) + 12;
-        } else {
-          // Math symbol groups
-          const mathGroup = createMathSymbolGroup(
-            elem.type, 
-            currentLeft, 
-            currentTop, 
-            textColor, 
-            {
-              numerator: elem.numerator,
-              denominator: elem.denominator,
-              topText: elem.topText,
-              bottomText: elem.bottomText,
-            }
-          );
-
-          if (mathGroup) {
-            mathGroup.set({
-              originX: 'left',
-              originY: 'center',
-              left: currentLeft,
-              top: currentTop,
-            });
-            
-            activeCanvas.add(mathGroup);
-            addedObjects.push(mathGroup);
-            
-            let estWidth = 50;
-            if (elem.type === 'fraction') {
-              const numLen = elem.numerator ? elem.numerator.length : 1;
-              const denLen = elem.denominator ? elem.denominator.length : 1;
-              const maxLen = Math.max(numLen, denLen);
-              estWidth = (maxLen * 12) + 24;
-            } else if (elem.type === 'sigma_sum' || elem.type === 'product' || elem.type === 'definite_integral') {
-              estWidth = 55;
-            } else if (elem.type === 'limit') {
-              estWidth = 65;
-            }
-            currentLeft += estWidth + 10;
+        // Process line by line
+        for (const line of linesOfElements) {
+          if (line.length === 0) {
+            currentTop += 65;
+            continue;
           }
+
+          // Determine if this line contains any RTL (Kurdish/Arabic) text
+          const lineIsRtl = line.some((elem: any) => elem.type === 'text' && elem.text && isRtlText(elem.text));
+
+          // Calculate total line width to center it beautifully
+          let totalLineWidth = 0;
+          const elemWidths = line.map((elem: any) => {
+            const fSize = elem.fontSize || 14;
+            if (elem.type === 'text') {
+              if (!elem.text) return 0;
+              return (elem.text.length * fSize * 0.55) + 12;
+            } else if (elem.type === 'line') {
+              return (elem.width || 120) + 12;
+            } else if (elem.type === 'arrow') {
+              return (elem.width || 80) + 12;
+            } else if (elem.type === 'square') {
+              const size = elem.width || elem.height || 40;
+              return size + 12;
+            } else if (elem.type === 'rectangle') {
+              const rw = elem.width || 60;
+              return rw + 12;
+            } else if (elem.type === 'image_icon') {
+              return (elem.fontSize || 38) + 12;
+            } else {
+              // Math symbol groups
+              let estWidth = 50;
+              if (elem.type === 'fraction') {
+                const numLen = elem.numerator ? elem.numerator.length : 1;
+                const denLen = elem.denominator ? elem.denominator.length : 1;
+                const maxLen = Math.max(numLen, denLen);
+                estWidth = (maxLen * 12) + 24;
+              } else if (elem.type === 'sigma_sum' || elem.type === 'product' || elem.type === 'definite_integral') {
+                estWidth = 55;
+              } else if (elem.type === 'limit') {
+                estWidth = 65;
+              }
+              return estWidth + 10;
+            }
+          });
+
+          totalLineWidth = elemWidths.reduce((sum, w) => sum + w, 0);
+
+          // Center position on X-axis
+          let currentLeft = 0;
+          if (lineIsRtl) {
+            // If RTL, we start on the right and move leftward
+            currentLeft = center.x + (totalLineWidth / 2);
+          } else {
+            // If LTR, we start on the left and move rightward
+            currentLeft = center.x - (totalLineWidth / 2);
+          }
+
+          // Add each element in the line
+          for (let i = 0; i < line.length; i++) {
+            const elem = line[i];
+            const elemWidth = elemWidths[i];
+            if (elemWidth === 0) continue;
+
+            const fSize = elem.fontSize || 14; // Default font size 14 as requested
+            const elementColor = elem.color || textColor;
+
+            if (elem.type === 'text') {
+              if (!elem.text) continue;
+              const textObj = new window.fabric.Textbox(elem.text, {
+                left: currentLeft,
+                top: currentTop,
+                width: elem.width || elemWidth || 250,
+                fontSize: fSize,
+                fill: elementColor,
+                fontFamily: 'Noto Sans Arabic, Inter, sans-serif',
+                selectable: true,
+                originX: lineIsRtl ? 'right' : 'left',
+                originY: 'center',
+                textAlign: lineIsRtl ? 'right' : 'left',
+                splitByGrapheme: true,
+                minWidth: 10
+              });
+              activeCanvas.add(textObj);
+              addedObjects.push(textObj);
+            } else if (elem.type === 'line') {
+              const w = elem.width || 120;
+              const lineObj = new window.fabric.Line(
+                lineIsRtl 
+                  ? [currentLeft, currentTop, currentLeft - w, currentTop]
+                  : [currentLeft, currentTop, currentLeft + w, currentTop], 
+                {
+                  stroke: elementColor,
+                  strokeWidth: elem.strokeWidth || 2,
+                  selectable: true,
+                  originX: lineIsRtl ? 'right' : 'left',
+                  originY: 'center'
+                }
+              );
+              activeCanvas.add(lineObj);
+              addedObjects.push(lineObj);
+            } else if (elem.type === 'arrow') {
+              const w = elem.width || 80;
+              let arrowGroup;
+              if (lineIsRtl) {
+                const arrowShaft = new window.fabric.Line([currentLeft, currentTop, currentLeft - w + 10, currentTop], {
+                  stroke: elementColor,
+                  strokeWidth: elem.strokeWidth || 3,
+                  selectable: true,
+                  originX: 'right',
+                  originY: 'center'
+                });
+                const arrowHead = new window.fabric.Triangle({
+                  left: currentLeft - w,
+                  top: currentTop,
+                  width: 12,
+                  height: 12,
+                  fill: elementColor,
+                  angle: 270,
+                  originX: 'center',
+                  originY: 'center',
+                  selectable: true
+                });
+                arrowGroup = new window.fabric.Group([arrowShaft, arrowHead], {
+                  selectable: true,
+                  hasControls: true
+                });
+              } else {
+                const arrowShaft = new window.fabric.Line([currentLeft, currentTop, currentLeft + w - 10, currentTop], {
+                  stroke: elementColor,
+                  strokeWidth: elem.strokeWidth || 3,
+                  selectable: true,
+                  originX: 'left',
+                  originY: 'center'
+                });
+                const arrowHead = new window.fabric.Triangle({
+                  left: currentLeft + w,
+                  top: currentTop,
+                  width: 12,
+                  height: 12,
+                  fill: elementColor,
+                  angle: 90,
+                  originX: 'center',
+                  originY: 'center',
+                  selectable: true
+                });
+                arrowGroup = new window.fabric.Group([arrowShaft, arrowHead], {
+                  selectable: true,
+                  hasControls: true
+                });
+              }
+              activeCanvas.add(arrowGroup);
+              addedObjects.push(arrowGroup);
+            } else if (elem.type === 'square') {
+              const size = elem.width || elem.height || 40;
+              const squareObj = new window.fabric.Rect({
+                left: lineIsRtl ? currentLeft - size : currentLeft,
+                top: currentTop - size/2,
+                width: size,
+                height: size,
+                fill: 'transparent',
+                stroke: elementColor,
+                strokeWidth: elem.strokeWidth || 2,
+                strokeUniform: true,
+                selectable: true
+              });
+              activeCanvas.add(squareObj);
+              addedObjects.push(squareObj);
+            } else if (elem.type === 'rectangle') {
+              const rw = elem.width || 60;
+              const rh = elem.height || 40;
+              const rectObj = new window.fabric.Rect({
+                left: lineIsRtl ? currentLeft - rw : currentLeft,
+                top: currentTop - rh/2,
+                width: rw,
+                height: rh,
+                fill: 'transparent',
+                stroke: elementColor,
+                strokeWidth: elem.strokeWidth || 2,
+                strokeUniform: true,
+                selectable: true
+              });
+              activeCanvas.add(rectObj);
+              addedObjects.push(rectObj);
+            } else if (elem.type === 'image_icon') {
+              const emoji = elem.text || '🫀';
+              const iconObj = new window.fabric.IText(emoji, {
+                left: currentLeft,
+                top: currentTop,
+                fontSize: elem.fontSize || 38,
+                selectable: true,
+                originX: lineIsRtl ? 'right' : 'left',
+                originY: 'center',
+              });
+              activeCanvas.add(iconObj);
+              addedObjects.push(iconObj);
+            } else {
+              // Math symbol groups
+              const mathGroup = createMathSymbolGroup(
+                elem.type, 
+                currentLeft, 
+                currentTop, 
+                textColor, 
+                {
+                  numerator: elem.numerator,
+                  denominator: elem.denominator,
+                  topText: elem.topText,
+                  bottomText: elem.bottomText,
+                }
+              );
+
+              if (mathGroup) {
+                mathGroup.set({
+                  originX: lineIsRtl ? 'right' : 'left',
+                  originY: 'center',
+                  left: currentLeft,
+                  top: currentTop,
+                });
+                
+                activeCanvas.add(mathGroup);
+                addedObjects.push(mathGroup);
+              }
+            }
+
+            // Advance left position for next element
+            if (lineIsRtl) {
+              currentLeft -= elemWidth;
+            } else {
+              currentLeft += elemWidth;
+            }
+          }
+
+          // Move top down for next line
+          currentTop += 65;
         }
       }
 
@@ -621,12 +864,634 @@ const App: React.FC = () => {
     }
   };
 
+  const getElementsFromCanvas = (canvas: any) => {
+    if (!canvas) return [];
+    const center = canvas.getVpCenter();
+    const objects = canvas.getObjects();
+    const elements = [];
+
+    for (const obj of objects) {
+      if (obj.id === 'temp-guide' || obj.isType('activeSelection')) continue;
+
+      const rx = Math.round(obj.left - center.x);
+      const ry = Math.round(obj.top - center.y);
+      const angle = obj.angle || 0;
+      const color = obj.fill || obj.stroke || '#1f2937';
+      const strokeWidth = obj.strokeWidth || 2;
+      const fSize = obj.fontSize || 14;
+
+      if (obj.isFractionGroup || obj.fractionId) {
+        const children = obj.getObjects ? obj.getObjects() : [];
+        const numTextObj = children.find((c: any) => c.fractionRole === 'numerator');
+        const denTextObj = children.find((c: any) => c.fractionRole === 'denominator');
+        elements.push({
+          type: 'fraction',
+          numerator: numTextObj ? numTextObj.text : 'a',
+          denominator: denTextObj ? denTextObj.text : 'b',
+          x: rx,
+          y: ry,
+          color: obj.fractionColor || color,
+          angle: angle
+        });
+      } else if (obj.mathRole === 'main' || obj.type === 'group') {
+        const children = obj.getObjects ? obj.getObjects() : [];
+        const mainObj = children.find((c: any) => c.mathRole === 'main');
+        const topObj = children.find((c: any) => c.mathRole === 'top');
+        const bottomObj = children.find((c: any) => c.mathRole === 'bottom');
+        
+        let mathType = 'text';
+        if (mainObj) {
+          if (mainObj.text === '∑') mathType = 'sigma_sum';
+          else if (mainObj.text === '∏') mathType = 'product';
+          else if (mainObj.text === '∫') mathType = 'definite_integral';
+          else if (mainObj.text === 'lim') mathType = 'limit';
+        } else {
+          const hasLine = children.some((c: any) => c.type === 'line');
+          const hasTriangle = children.some((c: any) => c.type === 'triangle');
+          if (hasLine && hasTriangle) {
+            elements.push({
+              type: 'arrow',
+              x: rx,
+              y: ry,
+              width: obj.width || 80,
+              color: color,
+              angle: angle
+            });
+            continue;
+          }
+        }
+
+        if (mathType !== 'text') {
+          elements.push({
+            type: mathType,
+            topText: topObj ? topObj.text : '',
+            bottomText: bottomObj ? bottomObj.text : '',
+            x: rx,
+            y: ry,
+            color: color,
+            angle: angle
+          });
+        } else {
+          const textParts = children.filter((c: any) => c.text !== undefined).map((c: any) => c.text).join(' ');
+          if (textParts.trim()) {
+            elements.push({
+              type: 'text',
+              text: textParts,
+              x: rx,
+              y: ry,
+              fontSize: fSize,
+              color: color,
+              angle: angle
+            });
+          }
+        }
+      } else if (obj.type === 'textbox' || obj.type === 'i-text' || obj.type === 'text') {
+        const text = obj.text || '';
+        const emojiRegex = /[\uD800-\uDBFF][\uDC00-\uDFFF]|\uD83C[\uDC00-\uDFFF]|\uD83D[\uDC00-\uDFFF]|[\u2600-\u27BF]/;
+        if (text.length <= 4 && emojiRegex.test(text)) {
+          elements.push({
+            type: 'image_icon',
+            text: text,
+            x: rx,
+            y: ry,
+            fontSize: fSize,
+            angle: angle
+          });
+        } else {
+          elements.push({
+            type: 'text',
+            text: text,
+            x: rx,
+            y: ry,
+            fontSize: fSize,
+            color: color,
+            angle: angle
+          });
+        }
+      } else if (obj.type === 'line') {
+        elements.push({
+          type: 'line',
+          x: rx,
+          y: ry,
+          width: obj.width || 120,
+          strokeWidth: strokeWidth,
+          color: obj.stroke || color,
+          angle: angle
+        });
+      } else if (obj.type === 'rect') {
+        if (obj.width === obj.height) {
+          elements.push({
+            type: 'square',
+            x: rx,
+            y: ry,
+            width: obj.width,
+            strokeWidth: strokeWidth,
+            color: obj.stroke || color,
+            angle: angle
+          });
+        } else {
+          elements.push({
+            type: 'rectangle',
+            x: rx,
+            y: ry,
+            width: obj.width,
+            height: obj.height,
+            strokeWidth: strokeWidth,
+            color: obj.stroke || color,
+            angle: angle
+          });
+        }
+      }
+    }
+
+    return elements;
+  };
+
+  const handleTroubleshootPage = async (instruction: string) => {
+    const hasServerKey = await checkServerConfig();
+    if (!apiKey && !hasServerKey) {
+      alert("تکایە سەرەتا API Key زیاد بکە لە ڕێکخستنەکان (Settings)");
+      setShowApiModal(true);
+      return;
+    }
+
+    const activeCanvas = canvasesRef.current[activePage];
+    if (!activeCanvas || !window.fabric) return;
+
+    setEditorState(prev => ({ 
+      ...prev, 
+      isProcessing: true, 
+      statusMessage: 'چاوەڕێبە... چارەسەرکرنا ئاریشێن لاپەرەی دهێتە ئەنجامدان...' 
+    }));
+
+    try {
+      const currentElements = getElementsFromCanvas(activeCanvas);
+
+      const jsonString = await troubleshootPage(apiKey, currentElements, instruction);
+      
+      let cleanJsonString = jsonString.trim();
+      if (cleanJsonString.startsWith('```')) {
+        cleanJsonString = cleanJsonString.replace(/^```json\s*/i, '').replace(/```$/, '').trim();
+      }
+      
+      let data;
+      try {
+        data = JSON.parse(cleanJsonString);
+      } catch (e) {
+        const startIdx = cleanJsonString.indexOf('{');
+        const endIdx = cleanJsonString.lastIndexOf('}');
+        if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+          const possibleJson = cleanJsonString.substring(startIdx, endIdx + 1);
+          data = JSON.parse(possibleJson);
+        } else {
+          throw e;
+        }
+      }
+      if (!data || !Array.isArray(data.elements)) {
+        throw new Error("داتای وەرگیراو نە گونجاوە.");
+      }
+
+      const history = getPageHistory(activePage);
+      history.undoStack.push(JSON.stringify(activeCanvas.toJSON()));
+      history.redoStack = [];
+
+      const objects = activeCanvas.getObjects();
+      while (objects.length > 0) {
+        activeCanvas.remove(objects[0]);
+      }
+
+      const elements = data.elements;
+      const center = activeCanvas.getVpCenter();
+      let currentTop = center.y - 120;
+      const textColor = editorState.strokeColor || '#1f2937';
+      
+      const addedObjects: any[] = [];
+
+      const isRtlText = (text: string): boolean => {
+        const rtlRegex = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
+        return rtlRegex.test(text);
+      };
+
+      const hasCoordinates = elements.some((elem: any) => elem.x !== undefined && elem.y !== undefined);
+
+      if (hasCoordinates) {
+        for (const elem of elements) {
+          if (elem.type === 'newline') continue;
+
+          const fSize = elem.fontSize || 14;
+          const elementColor = elem.color || textColor;
+          const angle = elem.angle !== undefined ? elem.angle : 0;
+          
+          const left = center.x + (elem.x || 0);
+          const top = center.y + (elem.y || 0);
+
+          if (elem.type === 'text') {
+            if (!elem.text) continue;
+            const isRtl = isRtlText(elem.text);
+            const textWidth = elem.width || Math.max(100, Math.min(350, (elem.text.length * fSize * 0.75) + 16));
+            const textObj = new window.fabric.Textbox(elem.text, {
+              left: left,
+              top: top,
+              width: textWidth,
+              fontSize: fSize,
+              fill: elementColor,
+              fontFamily: 'Noto Sans Arabic, Inter, sans-serif',
+              selectable: true,
+              originX: 'center',
+              originY: 'center',
+              textAlign: isRtl ? 'right' : 'left',
+              angle: angle,
+              splitByGrapheme: true,
+              minWidth: 10
+            });
+            activeCanvas.add(textObj);
+            addedObjects.push(textObj);
+          } else if (elem.type === 'line') {
+            const w = elem.width || 120;
+            const lineObj = new window.fabric.Line([-w/2, 0, w/2, 0], {
+              stroke: elementColor,
+              strokeWidth: elem.strokeWidth || 2,
+              selectable: true,
+              originX: 'center',
+              originY: 'center',
+              left: left,
+              top: top,
+              angle: angle
+            });
+            activeCanvas.add(lineObj);
+            addedObjects.push(lineObj);
+          } else if (elem.type === 'arrow') {
+            const w = elem.width || 80;
+            const arrowShaft = new window.fabric.Line([-w/2, 0, w/2 - 6, 0], {
+              stroke: elementColor,
+              strokeWidth: elem.strokeWidth || 3,
+              originX: 'center',
+              originY: 'center'
+            });
+            const arrowHead = new window.fabric.Triangle({
+              left: w/2 - 3,
+              top: 0,
+              width: 12,
+              height: 12,
+              fill: elementColor,
+              angle: 90,
+              originX: 'center',
+              originY: 'center'
+            });
+            const arrowGroup = new window.fabric.Group([arrowShaft, arrowHead], {
+              left: left,
+              top: top,
+              angle: angle,
+              selectable: true,
+              hasControls: true
+            });
+            activeCanvas.add(arrowGroup);
+            addedObjects.push(arrowGroup);
+          } else if (elem.type === 'square') {
+            const size = elem.width || elem.height || 40;
+            const squareObj = new window.fabric.Rect({
+              left: left,
+              top: top,
+              width: size,
+              height: size,
+              fill: 'transparent',
+              stroke: elementColor,
+              strokeWidth: elem.strokeWidth || 2,
+              strokeUniform: true,
+              selectable: true,
+              originX: 'center',
+              originY: 'center',
+              angle: angle
+            });
+            activeCanvas.add(squareObj);
+            addedObjects.push(squareObj);
+          } else if (elem.type === 'rectangle') {
+            const rw = elem.width || 60;
+            const rh = elem.height || 40;
+            const rectObj = new window.fabric.Rect({
+              left: left,
+              top: top,
+              width: rw,
+              height: rh,
+              fill: 'transparent',
+              stroke: elementColor,
+              strokeWidth: elem.strokeWidth || 2,
+              strokeUniform: true,
+              selectable: true,
+              originX: 'center',
+              originY: 'center',
+              angle: angle
+            });
+            activeCanvas.add(rectObj);
+            addedObjects.push(rectObj);
+          } else if (elem.type === 'image_icon') {
+            const emoji = elem.text || '🫀';
+            const iconObj = new window.fabric.IText(emoji, {
+              left: left,
+              top: top,
+              fontSize: elem.fontSize || 38,
+              selectable: true,
+              originX: 'center',
+              originY: 'center',
+              angle: angle
+            });
+            activeCanvas.add(iconObj);
+            addedObjects.push(iconObj);
+          } else {
+            const mathGroup = createMathSymbolGroup(
+              elem.type, 
+              left, 
+              top, 
+              textColor, 
+              {
+                numerator: elem.numerator,
+                denominator: elem.denominator,
+                topText: elem.topText,
+                bottomText: elem.bottomText,
+              }
+            );
+
+            if (mathGroup) {
+              mathGroup.set({
+                originX: 'center',
+                originY: 'center',
+                left: left,
+                top: top,
+                angle: angle
+              });
+              activeCanvas.add(mathGroup);
+              addedObjects.push(mathGroup);
+            }
+          }
+        }
+      } else {
+        const linesOfElements: any[][] = [[]];
+        for (const elem of elements) {
+          if (elem.type === 'newline') {
+            linesOfElements.push([]);
+          } else {
+            linesOfElements[linesOfElements.length - 1].push(elem);
+          }
+        }
+
+        for (const line of linesOfElements) {
+          if (line.length === 0) {
+            currentTop += 65;
+            continue;
+          }
+
+          const lineIsRtl = line.some((elem: any) => elem.type === 'text' && elem.text && isRtlText(elem.text));
+
+          let totalLineWidth = 0;
+          const elemWidths = line.map((elem: any) => {
+            const fSize = elem.fontSize || 14;
+            if (elem.type === 'text') {
+              if (!elem.text) return 0;
+              return (elem.text.length * fSize * 0.55) + 12;
+            } else if (elem.type === 'line') {
+              return (elem.width || 120) + 12;
+            } else if (elem.type === 'arrow') {
+              return (elem.width || 80) + 12;
+            } else if (elem.type === 'square') {
+              const size = elem.width || elem.height || 40;
+              return size + 12;
+            } else if (elem.type === 'rectangle') {
+              const rw = elem.width || 60;
+              return rw + 12;
+            } else if (elem.type === 'image_icon') {
+              return (elem.fontSize || 38) + 12;
+            } else {
+              let estWidth = 50;
+              if (elem.type === 'fraction') {
+                const numLen = elem.numerator ? elem.numerator.length : 1;
+                const denLen = elem.denominator ? elem.denominator.length : 1;
+                const maxLen = Math.max(numLen, denLen);
+                estWidth = (maxLen * 12) + 24;
+              } else if (elem.type === 'sigma_sum' || elem.type === 'product' || elem.type === 'definite_integral') {
+                estWidth = 55;
+              } else if (elem.type === 'limit') {
+                estWidth = 65;
+              }
+              return estWidth + 10;
+            }
+          });
+
+          totalLineWidth = elemWidths.reduce((sum, w) => sum + w, 0);
+
+          let currentLeft = 0;
+          if (lineIsRtl) {
+            currentLeft = center.x + (totalLineWidth / 2);
+          } else {
+            currentLeft = center.x - (totalLineWidth / 2);
+          }
+
+          for (let i = 0; i < line.length; i++) {
+            const elem = line[i];
+            const elemWidth = elemWidths[i];
+            if (elemWidth === 0) continue;
+
+            const fSize = elem.fontSize || 14;
+            const elementColor = elem.color || textColor;
+
+            if (elem.type === 'text') {
+              if (!elem.text) continue;
+              const textObj = new window.fabric.Textbox(elem.text, {
+                left: currentLeft,
+                top: currentTop,
+                width: elem.width || elemWidth || 250,
+                fontSize: fSize,
+                fill: elementColor,
+                fontFamily: 'Noto Sans Arabic, Inter, sans-serif',
+                selectable: true,
+                originX: lineIsRtl ? 'right' : 'left',
+                originY: 'center',
+                textAlign: lineIsRtl ? 'right' : 'left',
+                splitByGrapheme: true,
+                minWidth: 10
+              });
+              activeCanvas.add(textObj);
+              addedObjects.push(textObj);
+            } else if (elem.type === 'line') {
+              const w = elem.width || 120;
+              const lineObj = new window.fabric.Line(
+                lineIsRtl 
+                  ? [currentLeft, currentTop, currentLeft - w, currentTop]
+                  : [currentLeft, currentTop, currentLeft + w, currentTop], 
+                {
+                  stroke: elementColor,
+                  strokeWidth: elem.strokeWidth || 2,
+                  selectable: true,
+                  originX: lineIsRtl ? 'right' : 'left',
+                  originY: 'center'
+                }
+              );
+              activeCanvas.add(lineObj);
+              addedObjects.push(lineObj);
+            } else if (elem.type === 'arrow') {
+              const w = elem.width || 80;
+              let arrowGroup;
+              if (lineIsRtl) {
+                const arrowShaft = new window.fabric.Line([currentLeft, currentTop, currentLeft - w + 10, currentTop], {
+                  stroke: elementColor,
+                  strokeWidth: elem.strokeWidth || 3,
+                  selectable: true,
+                  originX: 'right',
+                  originY: 'center'
+                });
+                const arrowHead = new window.fabric.Triangle({
+                  left: currentLeft - w,
+                  top: currentTop,
+                  width: 12,
+                  height: 12,
+                  fill: elementColor,
+                  angle: 270,
+                  originX: 'center',
+                  originY: 'center',
+                  selectable: true
+                });
+                arrowGroup = new window.fabric.Group([arrowShaft, arrowHead], {
+                  selectable: true,
+                  hasControls: true
+                });
+              } else {
+                const arrowShaft = new window.fabric.Line([currentLeft, currentTop, currentLeft + w - 10, currentTop], {
+                  stroke: elementColor,
+                  strokeWidth: elem.strokeWidth || 3,
+                  selectable: true,
+                  originX: 'left',
+                  originY: 'center'
+                });
+                const arrowHead = new window.fabric.Triangle({
+                  left: currentLeft + w,
+                  top: currentTop,
+                  width: 12,
+                  height: 12,
+                  fill: elementColor,
+                  angle: 90,
+                  originX: 'center',
+                  originY: 'center',
+                  selectable: true
+                });
+                arrowGroup = new window.fabric.Group([arrowShaft, arrowHead], {
+                  selectable: true,
+                  hasControls: true
+                });
+              }
+              activeCanvas.add(arrowGroup);
+              addedObjects.push(arrowGroup);
+            } else if (elem.type === 'square') {
+              const size = elem.width || elem.height || 40;
+              const squareObj = new window.fabric.Rect({
+                left: lineIsRtl ? currentLeft - size : currentLeft,
+                top: currentTop - size/2,
+                width: size,
+                height: size,
+                fill: 'transparent',
+                stroke: elementColor,
+                strokeWidth: elem.strokeWidth || 2,
+                strokeUniform: true,
+                selectable: true
+              });
+              activeCanvas.add(squareObj);
+              addedObjects.push(squareObj);
+            } else if (elem.type === 'rectangle') {
+              const rw = elem.width || 60;
+              const rh = elem.height || 40;
+              const rectObj = new window.fabric.Rect({
+                left: lineIsRtl ? currentLeft - rw : currentLeft,
+                top: currentTop - rh/2,
+                width: rw,
+                height: rh,
+                fill: 'transparent',
+                stroke: elementColor,
+                strokeWidth: elem.strokeWidth || 2,
+                strokeUniform: true,
+                selectable: true
+              });
+              activeCanvas.add(rectObj);
+              addedObjects.push(rectObj);
+            } else if (elem.type === 'image_icon') {
+              const emoji = elem.text || '🫀';
+              const iconObj = new window.fabric.IText(emoji, {
+                left: currentLeft,
+                top: currentTop,
+                fontSize: elem.fontSize || 38,
+                selectable: true,
+                originX: lineIsRtl ? 'right' : 'left',
+                originY: 'center',
+              });
+              activeCanvas.add(iconObj);
+              addedObjects.push(iconObj);
+            } else {
+              const mathGroup = createMathSymbolGroup(
+                elem.type, 
+                currentLeft, 
+                currentTop, 
+                textColor, 
+                {
+                  numerator: elem.numerator,
+                  denominator: elem.denominator,
+                  topText: elem.topText,
+                  bottomText: elem.bottomText,
+                }
+              );
+
+              if (mathGroup) {
+                mathGroup.set({
+                  originX: lineIsRtl ? 'right' : 'left',
+                  originY: 'center',
+                  left: currentLeft,
+                  top: currentTop,
+                });
+                
+                activeCanvas.add(mathGroup);
+                addedObjects.push(mathGroup);
+              }
+            }
+
+            if (lineIsRtl) {
+              currentLeft -= elemWidth;
+            } else {
+              currentLeft += elemWidth;
+            }
+          }
+
+          currentTop += 65;
+        }
+      }
+
+      if (addedObjects.length > 0) {
+        const sel = new window.fabric.ActiveSelection(addedObjects, {
+          canvas: activeCanvas,
+        });
+        activeCanvas.setActiveObject(sel);
+      }
+
+      activeCanvas.renderAll();
+      saveCanvasState(activePage);
+      
+      setEditorState(prev => ({ 
+        ...prev, 
+        isProcessing: false, 
+        statusMessage: 'لاپەڕە بە سەرکەوتوویی ڕێکخرایەوە و چارەسەرکرا!' 
+      }));
+    } catch (error: any) {
+      console.error("Troubleshooting layout failed:", error);
+      alert("کێشەیەک ڕوویدا لە چارەسەرکردندا: " + (error.message || error));
+      setEditorState(prev => ({ 
+        ...prev, 
+        isProcessing: false, 
+        statusMessage: null 
+      }));
+    }
+  };
+
   // Helper to add text to canvas
   const addTextToCanvas = (text: string) => {
     const activeCanvas = canvasesRef.current[activePage];
     if (activeCanvas && window.fabric) {
       const activeObj = activeCanvas.getActiveObject();
-      if (activeObj && (activeObj.isType('i-text') || activeObj.isType('text'))) {
+      if (activeObj && (activeObj.isType('i-text') || activeObj.isType('text') || activeObj.isType('textbox') || activeObj.type === 'textbox')) {
         const currentText = activeObj.text || '';
         // If it was the default placeholder "بنڤیسە", replace it entirely
         if (currentText === 'بنڤیسە') {
@@ -638,15 +1503,16 @@ const App: React.FC = () => {
         return;
       }
 
-      const iText = new window.fabric.IText(text, {
+      const iText = new window.fabric.Textbox(text, {
         left: 50,
         top: 50,
         fontSize: 18,
         fill: editorState.strokeColor,
         fontFamily: 'Noto Sans Arabic',
-        direction: 'rtl',
         textAlign: 'right',
-        width: 300
+        width: 350,
+        splitByGrapheme: true,
+        minWidth: 10
       });
       activeCanvas.add(iText);
       activeCanvas.setActiveObject(iText);
@@ -779,6 +1645,7 @@ const App: React.FC = () => {
         fill: 'transparent',
         stroke: strokeColor,
         strokeWidth: strokeWidth,
+        strokeUniform: true,
         selectable: true
       });
     } else if (elementType === 'rectangle') {
@@ -790,6 +1657,7 @@ const App: React.FC = () => {
         fill: 'transparent',
         stroke: strokeColor,
         strokeWidth: strokeWidth,
+        strokeUniform: true,
         selectable: true
       });
     } else if (elementType === 'circle') {
@@ -800,12 +1668,14 @@ const App: React.FC = () => {
         fill: 'transparent',
         stroke: strokeColor,
         strokeWidth: strokeWidth,
+        strokeUniform: true,
         selectable: true
       });
     } else if (elementType === 'line') {
       newObj = new window.fabric.Line([center.x - 75, center.y, center.x + 75, center.y], {
         stroke: strokeColor,
         strokeWidth: strokeWidth,
+        strokeUniform: true,
         selectable: true
       });
     } else if (elementType === 'rhombus') {
@@ -823,6 +1693,7 @@ const App: React.FC = () => {
         fill: 'transparent',
         stroke: strokeColor,
         strokeWidth: strokeWidth,
+        strokeUniform: true,
         selectable: true
       });
     } else if (elementType === 'arrow') {
@@ -834,6 +1705,7 @@ const App: React.FC = () => {
         strokeWidth: strokeWidth,
         strokeLineCap: 'round',
         strokeLineJoin: 'round',
+        strokeUniform: true,
         selectable: true
       });
       newObj.set({ scaleX: 1.5, scaleY: 1.5 });
@@ -1327,6 +2199,7 @@ const App: React.FC = () => {
         onAddElement={handleAddElementToCanvas}
         onAddMathSymbol={handleAddMathSymbolToCanvas}
         onAIParseMath={handleAIParseMath}
+        onTroubleshootPage={handleTroubleshootPage}
       />
 
       <div className="relative flex flex-1 overflow-hidden flex-col md:flex-row pt-24 md:pt-0">
