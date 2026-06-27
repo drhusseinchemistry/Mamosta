@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Icons } from './Icon';
-import { improveTextWithAI, generateQuestionsFromFile } from '../services/geminiService';
+import { improveTextWithAI, generateQuestionsFromFile, checkServerConfig } from '../services/geminiService';
 
 interface TextFormatterProps {
   canvas: any;
@@ -37,8 +37,8 @@ export const TextFormatter: React.FC<TextFormatterProps> = ({ canvas, activeObje
   const [isItalic, setIsItalic] = useState(false);
   const [isUnderline, setIsUnderline] = useState(false);
   const [isLinethrough, setIsLinethrough] = useState(false);
-  const [textAlign, setTextAlign] = useState('left');
-  const [textDirection, setTextDirection] = useState<'ltr' | 'rtl'>('ltr');
+  const [textAlign, setTextAlign] = useState('right');
+  const [textDirection, setTextDirection] = useState<'ltr' | 'rtl'>('rtl');
   const [charSpacing, setCharSpacing] = useState(0);
   const [lineHeight, setLineHeight] = useState(1.16);
   const [opacity, setOpacity] = useState(1);
@@ -54,8 +54,9 @@ export const TextFormatter: React.FC<TextFormatterProps> = ({ canvas, activeObje
   const handleAIImprove = async () => {
     if (!activeObject || !isText) return;
     
-    const apiKey = localStorage.getItem('gemini_api_key');
-    if (!apiKey) {
+    const apiKey = localStorage.getItem('gemini_api_key') || '';
+    const hasServerKey = await checkServerConfig();
+    if (!apiKey && !hasServerKey) {
       setAiError('تکایە سەرەتا کلیلێ API دابنێ ل ڕێکخستنان (Settings)');
       return;
     }
@@ -110,8 +111,9 @@ export const TextFormatter: React.FC<TextFormatterProps> = ({ canvas, activeObje
   const handleGenerateQuestions = async () => {
     if (!activeObject || !uploadedFile) return;
 
-    const apiKey = localStorage.getItem('gemini_api_key');
-    if (!apiKey) {
+    const apiKey = localStorage.getItem('gemini_api_key') || '';
+    const hasServerKey = await checkServerConfig();
+    if (!apiKey && !hasServerKey) {
       setAiError('تکایە سەرەتا کلیلێ API دابنێ ل ڕێکخستنان (Settings)');
       return;
     }
@@ -151,8 +153,8 @@ export const TextFormatter: React.FC<TextFormatterProps> = ({ canvas, activeObje
         setIsItalic(activeObject.fontStyle === 'italic');
         setIsUnderline(!!activeObject.underline);
         setIsLinethrough(!!activeObject.linethrough);
-        setTextAlign(activeObject.textAlign || 'left');
-        setTextDirection(activeObject.direction || 'ltr');
+        setTextAlign(activeObject.textAlign || 'right');
+        setTextDirection(activeObject.direction || 'rtl');
         setCharSpacing(activeObject.charSpacing || 0);
         setLineHeight(activeObject.lineHeight || 1.16);
         

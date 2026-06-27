@@ -1,4 +1,4 @@
-export type ToolType = 'select' | 'pen' | 'highlighter' | 'line' | 'rect' | 'circle' | 'text' | 'eraser';
+export type ToolType = 'select' | 'pen' | 'highlighter' | 'line' | 'rect' | 'circle' | 'text' | 'eraser' | 'hand';
 
 export interface EditorState {
   activeTool: ToolType;

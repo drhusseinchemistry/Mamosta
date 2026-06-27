@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Toolbar from './components/Toolbar';
 import Sidebar from './components/Sidebar';
-import PageEditor from './components/PageEditor';
+import PageEditor, { createTableGroup } from './components/PageEditor';
+import { createMathSymbolGroup } from './utils/mathSymbols';
 import { TextFormatter } from './components/TextFormatter';
 import { EditorState, PageData, ToolType } from './types';
 import { initializePDFJS, loadPDFDocument, renderPDFPageToDataURL } from './services/pdfService';
-import { transcribeAudio, performOCR, validateApiKey, lastValidationError } from './services/geminiService';
+import { transcribeAudio, performOCR, validateApiKey, lastValidationError, generateMathFromImage, checkServerConfig } from './services/geminiService';
 import { Icons } from './components/Icon';
 
 const ThemeStyleInjector: React.FC<{ theme: string }> = ({ theme }) => {
@@ -68,7 +69,7 @@ const App: React.FC = () => {
 
   const [editorState, setEditorState] = useState<EditorState>({
     activeTool: 'pen',
-    strokeColor: '#FFD700',
+    strokeColor: '#000000',
     strokeWidth: 4,
     scale: 1,
     isProcessing: false,
@@ -216,8 +217,8 @@ const App: React.FC = () => {
     };
     loadLibs();
     
-    // Load API Key from local storage
-    const savedKey = localStorage.getItem('gemini_api_key');
+    // Load API Key from local storage or environment variables (e.g. for GitHub Pages/Cloud deployments)
+    const savedKey = localStorage.getItem('gemini_api_key') || (import.meta as any).env.VITE_GEMINI_API_KEY || '';
     if (savedKey) {
       setApiKey(savedKey);
       setApiStatus('connected'); // Assume connected if key exists locally
@@ -272,7 +273,8 @@ const App: React.FC = () => {
 
   // --- Audio Recording (STT) ---
   const handleToggleRecording = async () => {
-    if (!apiKey) {
+    const hasServerKey = await checkServerConfig();
+    if (!apiKey && !hasServerKey) {
       alert("تکایە سەرەتا API Key زیاد بکە لە ڕێکخستنەکان");
       setShowApiModal(true);
       return;
@@ -326,8 +328,9 @@ const App: React.FC = () => {
   };
 
   // --- OCR Logic (File Based) ---
-  const handleRunOCRClick = () => {
-    if (!apiKey) {
+  const handleRunOCRClick = async () => {
+    const hasServerKey = await checkServerConfig();
+    if (!apiKey && !hasServerKey) {
       alert("تکایە سەرەتا API Key زیاد بکە لە ڕێکخستنەکان");
       setShowApiModal(true);
       return;
@@ -373,6 +376,249 @@ const App: React.FC = () => {
           setEditorState(prev => ({...prev, isProcessing: false, statusMessage: null}));
           e.target.value = ''; // Reset input
       }
+  };
+
+  // --- AI Math Parser ---
+  const handleAIParseMath = async (file: File, instruction: string) => {
+    const hasServerKey = await checkServerConfig();
+    if (!apiKey && !hasServerKey) {
+      alert("تکایە سەرەتا API Key زیاد بکە لە ڕێکخستنەکان (Settings)");
+      setShowApiModal(true);
+      return;
+    }
+
+    const activeCanvas = canvasesRef.current[activePage];
+    if (!activeCanvas || !window.fabric) return;
+
+    setEditorState(prev => ({ 
+      ...prev, 
+      isProcessing: true, 
+      statusMessage: 'چاوەڕێبە... شیکردنەوەی بیرکاری دهێتە ئەنجامدان...' 
+    }));
+
+    try {
+      let imageDataUrl = '';
+      if (file.type === 'application/pdf') {
+        const pdfDoc = await loadPDFDocument(file);
+        const { dataUrl } = await renderPDFPageToDataURL(pdfDoc, 1, 1.5);
+        imageDataUrl = dataUrl;
+      } else {
+        imageDataUrl = await new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.onload = (evt) => resolve(evt.target?.result as string);
+          reader.readAsDataURL(file);
+        });
+      }
+
+      const jsonString = await generateMathFromImage(apiKey, imageDataUrl, instruction);
+      
+      let cleanJsonString = jsonString.trim();
+      if (cleanJsonString.startsWith('```')) {
+        cleanJsonString = cleanJsonString.replace(/^```json\s*/i, '').replace(/```$/, '').trim();
+      }
+      
+      const data = JSON.parse(cleanJsonString);
+      if (!data || !Array.isArray(data.elements)) {
+        throw new Error("داتای وەرگیراو نە گونجاوە.");
+      }
+
+      const elements = data.elements;
+      const center = activeCanvas.getVpCenter();
+      let startLeft = center.x - 120;
+      let currentLeft = startLeft;
+      let currentTop = center.y - 80;
+      const textColor = editorState.strokeColor || '#1f2937';
+      
+      const addedObjects: any[] = [];
+
+      // Helper to check if text contains Arabic/Kurdish characters for dynamic RTL
+      const isRtlText = (text: string): boolean => {
+        const rtlRegex = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
+        return rtlRegex.test(text);
+      };
+
+      for (const elem of elements) {
+        if (elem.type === 'newline') {
+          currentTop += 65;
+          currentLeft = startLeft;
+          continue;
+        }
+
+        const fSize = elem.fontSize || 14; // Default font size of 14 as requested
+        const elementColor = elem.color || textColor;
+
+        if (elem.type === 'text') {
+          if (!elem.text) continue;
+          
+          const isRtl = isRtlText(elem.text);
+          const textObj = new window.fabric.IText(elem.text, {
+            left: currentLeft,
+            top: currentTop,
+            fontSize: fSize,
+            fill: elementColor,
+            fontFamily: 'Noto Sans Arabic, Inter, sans-serif',
+            selectable: true,
+            originX: 'left',
+            originY: 'center',
+            direction: isRtl ? 'rtl' : 'ltr',
+            textAlign: isRtl ? 'right' : 'left'
+          });
+          
+          activeCanvas.add(textObj);
+          addedObjects.push(textObj);
+          
+          const estWidth = (elem.text.length * fSize * 0.55) + 12;
+          currentLeft += estWidth;
+        } else if (elem.type === 'line') {
+          const w = elem.width || 120;
+          const lineObj = new window.fabric.Line([currentLeft, currentTop, currentLeft + w, currentTop], {
+            stroke: elementColor,
+            strokeWidth: elem.strokeWidth || 2,
+            selectable: true,
+            originX: 'left',
+            originY: 'center'
+          });
+          activeCanvas.add(lineObj);
+          addedObjects.push(lineObj);
+          currentLeft += w + 12;
+        } else if (elem.type === 'arrow') {
+          const w = elem.width || 80;
+          const arrowShaft = new window.fabric.Line([currentLeft, currentTop, currentLeft + w - 10, currentTop], {
+            stroke: elementColor,
+            strokeWidth: elem.strokeWidth || 3,
+            selectable: true,
+            originX: 'left',
+            originY: 'center'
+          });
+          const arrowHead = new window.fabric.Triangle({
+            left: currentLeft + w,
+            top: currentTop,
+            width: 12,
+            height: 12,
+            fill: elementColor,
+            angle: 90,
+            originX: 'center',
+            originY: 'center',
+            selectable: true
+          });
+          const arrowGroup = new window.fabric.Group([arrowShaft, arrowHead], {
+            selectable: true,
+            hasControls: true
+          });
+          activeCanvas.add(arrowGroup);
+          addedObjects.push(arrowGroup);
+          currentLeft += w + 12;
+        } else if (elem.type === 'square') {
+          const size = elem.width || elem.height || 40;
+          const squareObj = new window.fabric.Rect({
+            left: currentLeft,
+            top: currentTop - size/2,
+            width: size,
+            height: size,
+            fill: 'transparent',
+            stroke: elementColor,
+            strokeWidth: elem.strokeWidth || 2,
+            selectable: true
+          });
+          activeCanvas.add(squareObj);
+          addedObjects.push(squareObj);
+          currentLeft += size + 12;
+        } else if (elem.type === 'rectangle') {
+          const rw = elem.width || 60;
+          const rh = elem.height || 40;
+          const rectObj = new window.fabric.Rect({
+            left: currentLeft,
+            top: currentTop - rh/2,
+            width: rw,
+            height: rh,
+            fill: 'transparent',
+            stroke: elementColor,
+            strokeWidth: elem.strokeWidth || 2,
+            selectable: true
+          });
+          activeCanvas.add(rectObj);
+          addedObjects.push(rectObj);
+          currentLeft += rw + 12;
+        } else if (elem.type === 'image_icon') {
+          const emoji = elem.text || '🫀';
+          const iconObj = new window.fabric.IText(emoji, {
+            left: currentLeft,
+            top: currentTop,
+            fontSize: elem.fontSize || 38,
+            selectable: true,
+            originX: 'left',
+            originY: 'center',
+          });
+          activeCanvas.add(iconObj);
+          addedObjects.push(iconObj);
+          currentLeft += (elem.fontSize || 38) + 12;
+        } else {
+          // Math symbol groups
+          const mathGroup = createMathSymbolGroup(
+            elem.type, 
+            currentLeft, 
+            currentTop, 
+            textColor, 
+            {
+              numerator: elem.numerator,
+              denominator: elem.denominator,
+              topText: elem.topText,
+              bottomText: elem.bottomText,
+            }
+          );
+
+          if (mathGroup) {
+            mathGroup.set({
+              originX: 'left',
+              originY: 'center',
+              left: currentLeft,
+              top: currentTop,
+            });
+            
+            activeCanvas.add(mathGroup);
+            addedObjects.push(mathGroup);
+            
+            let estWidth = 50;
+            if (elem.type === 'fraction') {
+              const numLen = elem.numerator ? elem.numerator.length : 1;
+              const denLen = elem.denominator ? elem.denominator.length : 1;
+              const maxLen = Math.max(numLen, denLen);
+              estWidth = (maxLen * 12) + 24;
+            } else if (elem.type === 'sigma_sum' || elem.type === 'product' || elem.type === 'definite_integral') {
+              estWidth = 55;
+            } else if (elem.type === 'limit') {
+              estWidth = 65;
+            }
+            currentLeft += estWidth + 10;
+          }
+        }
+      }
+
+      // Select all added elements together as an ActiveSelection so they are temporarily grouped for moving, but individually editable
+      if (addedObjects.length > 0) {
+        const sel = new window.fabric.ActiveSelection(addedObjects, {
+          canvas: activeCanvas,
+        });
+        activeCanvas.setActiveObject(sel);
+      }
+
+      activeCanvas.renderAll();
+      saveCanvasState(activePage);
+      
+      setEditorState(prev => ({ 
+        ...prev, 
+        isProcessing: false, 
+        statusMessage: 'پرسیارا بیرکاری ب دروستی هاتە جێبەجێکرن!' 
+      }));
+    } catch (error: any) {
+      console.error("AI Math parsing failed:", error);
+      alert("کێشەیەک ڕوویدا: " + (error.message || error));
+      setEditorState(prev => ({ 
+        ...prev, 
+        isProcessing: false, 
+        statusMessage: null 
+      }));
+    }
   };
 
   // Helper to add text to canvas
@@ -511,6 +757,113 @@ const App: React.FC = () => {
             }
         }
         setEditorState(prev => ({ ...prev, activeTool: 'select' }));
+    }
+  };
+
+  const handleAddElementToCanvas = (elementType: string) => {
+    const activeCanvas = canvasesRef.current[activePage];
+    if (!activeCanvas || !window.fabric) return;
+    
+    const center = activeCanvas.getVpCenter();
+    const strokeColor = editorState.strokeColor;
+    const strokeWidth = editorState.strokeWidth;
+    
+    let newObj: any = null;
+    
+    if (elementType === 'square') {
+      newObj = new window.fabric.Rect({
+        left: center.x - 50,
+        top: center.y - 50,
+        width: 100,
+        height: 100,
+        fill: 'transparent',
+        stroke: strokeColor,
+        strokeWidth: strokeWidth,
+        selectable: true
+      });
+    } else if (elementType === 'rectangle') {
+      newObj = new window.fabric.Rect({
+        left: center.x - 75,
+        top: center.y - 50,
+        width: 150,
+        height: 100,
+        fill: 'transparent',
+        stroke: strokeColor,
+        strokeWidth: strokeWidth,
+        selectable: true
+      });
+    } else if (elementType === 'circle') {
+      newObj = new window.fabric.Circle({
+        left: center.x - 50,
+        top: center.y - 50,
+        radius: 50,
+        fill: 'transparent',
+        stroke: strokeColor,
+        strokeWidth: strokeWidth,
+        selectable: true
+      });
+    } else if (elementType === 'line') {
+      newObj = new window.fabric.Line([center.x - 75, center.y, center.x + 75, center.y], {
+        stroke: strokeColor,
+        strokeWidth: strokeWidth,
+        selectable: true
+      });
+    } else if (elementType === 'rhombus') {
+      const width = 100;
+      const height = 100;
+      const points = [
+        { x: width / 2, y: 0 },
+        { x: width, y: height / 2 },
+        { x: width / 2, y: height },
+        { x: 0, y: height / 2 }
+      ];
+      newObj = new window.fabric.Polygon(points, {
+        left: center.x - width / 2,
+        top: center.y - height / 2,
+        fill: 'transparent',
+        stroke: strokeColor,
+        strokeWidth: strokeWidth,
+        selectable: true
+      });
+    } else if (elementType === 'arrow') {
+      newObj = new window.fabric.Path('M 0 10 L 80 10 M 80 10 L 65 0 M 80 10 L 65 20', {
+        left: center.x - 40,
+        top: center.y - 10,
+        fill: 'transparent',
+        stroke: strokeColor,
+        strokeWidth: strokeWidth,
+        strokeLineCap: 'round',
+        strokeLineJoin: 'round',
+        selectable: true
+      });
+      newObj.set({ scaleX: 1.5, scaleY: 1.5 });
+    } else if (elementType === 'table') {
+      newObj = createTableGroup(3, 3, 4, 110, 40, Array(9).fill(''), center.x, center.y, strokeColor, strokeWidth);
+    }
+    
+    if (newObj) {
+      activeCanvas.add(newObj);
+      activeCanvas.setActiveObject(newObj);
+      activeCanvas.renderAll();
+      saveCanvasState(activePage);
+      setEditorState(prev => ({ ...prev, activeTool: 'select' }));
+    }
+  };
+
+  const handleAddMathSymbolToCanvas = (symbolType: string) => {
+    const activeCanvas = canvasesRef.current[activePage];
+    if (!activeCanvas || !window.fabric) return;
+    
+    const center = activeCanvas.getVpCenter();
+    const textColor = editorState.strokeColor || '#1f2937';
+    
+    const newObj = createMathSymbolGroup(symbolType, center.x, center.y, textColor);
+    if (newObj) {
+      activeCanvas.add(newObj);
+      activeCanvas.setActiveObject(newObj);
+      activeCanvas.renderAll();
+      saveCanvasState(activePage);
+      setEditorState(prev => ({ ...prev, activeTool: 'select' }));
     }
   };
 
@@ -971,6 +1324,9 @@ const App: React.FC = () => {
         voiceLanguage={voiceLanguage}
         onVoiceLanguageChange={setVoiceLanguage}
         iconSize={iconSize}
+        onAddElement={handleAddElementToCanvas}
+        onAddMathSymbol={handleAddMathSymbolToCanvas}
+        onAIParseMath={handleAIParseMath}
       />
 
       <div className="relative flex flex-1 overflow-hidden flex-col md:flex-row pt-24 md:pt-0">
@@ -1025,6 +1381,7 @@ const App: React.FC = () => {
                         onTextSelection={(canvas, obj) => {
                           if (obj) {
                             setActiveTextSelection({ canvas, object: obj });
+                            setEditorState(prev => ({ ...prev, activeTool: 'select' }));
                           } else {
                             setActiveTextSelection(null);
                           }

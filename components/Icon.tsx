@@ -23,6 +23,7 @@ import {
   Sparkles,
   Volume2,
   Globe,
+  Hand,
   Languages,
   Loader2,
   Bold,
@@ -53,14 +54,23 @@ import {
   ListOrdered,
   Group,
   Ungroup,
-  Move
+  Move,
+  Shapes,
+  Table as TableIcon,
+  Diamond,
+  ArrowRight,
+  Calculator,
+  Edit
 } from 'lucide-react';
 
 export const Icons = {
+  Edit: Edit,
+  Calculator: Calculator,
   Move: Move,
   Group: Group,
   Ungroup: Ungroup,
   Select: MousePointer2,
+  Hand: Hand,
   Pen: Pen,
   Highlighter: Highlighter,
   Line: Minus,
@@ -85,6 +95,10 @@ export const Icons = {
   Globe: Globe,
   Languages: Languages,
   Loader: Loader2,
+  Shapes: Shapes,
+  TableIcon: TableIcon,
+  Diamond: Diamond,
+  ArrowRight: ArrowRight,
   
   // Text Formatting and Styling Icons
   Bold: Bold,
