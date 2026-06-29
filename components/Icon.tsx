@@ -58,15 +58,22 @@ import {
   Ungroup,
   Move,
   Shapes,
+  MessageSquare,
   Table as TableIcon,
   Diamond,
   ArrowRight,
   Calculator,
-  Edit
+  Edit,
+  Code,
+  Check,
+  LineChart
 } from 'lucide-react';
 
 export const Icons = {
+  LineChart: LineChart,
+  Check: Check,
   Edit: Edit,
+  Code: Code,
   Calculator: Calculator,
   Move: Move,
   Group: Group,
@@ -93,6 +100,7 @@ export const Icons = {
   Settings: Settings,
   ScanText: ScanText,
   Sparkles: Sparkles,
+  MessageSquare: MessageSquare,
   Volume: Volume2,
   Globe: Globe,
   Languages: Languages,

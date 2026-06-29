@@ -697,6 +697,25 @@ const Toolbar: React.FC<ToolbarProps> = ({
               )}
             </div>
 
+            <div className="w-px h-6 bg-white/10 mx-1"></div>
+
+            {/* Mathematical Graphs Button */}
+            <div className="relative">
+              <button
+                onClick={() => {
+                  onAddElement('graph');
+                  setShowMathDropdown(false);
+                  setShowAsilaDropdown(false);
+                  setShowElementsDropdown(false);
+                }}
+                title="هێڵکاریێن بیرکاری (Mathematical Graphs)"
+                className="flex flex-col items-center justify-center p-1.5 rounded-lg transition-all duration-200 min-w-[3rem] text-gray-300 hover:bg-white/10 hover:text-white border border-transparent hover:scale-105 active:scale-95"
+              >
+                <Icons.LineChart size={iconSize} className="text-violet-400 animate-pulse" />
+                <span className="text-[9px] mt-0.5 font-bold uppercase tracking-wider text-violet-200 text-center">Graphs</span>
+              </button>
+            </div>
+
              {/* Asila Dropdown Trigger */}
              <div className="relative">
                <button
@@ -796,7 +815,7 @@ const Toolbar: React.FC<ToolbarProps> = ({
             <div className="w-px h-6 bg-white/10 mx-1"></div>
 
               {/* Char - Troubleshooting Box next to Asila */}
-              <div className="flex items-center gap-1.5 bg-sky-950/20 border border-sky-500/25 rounded-lg px-2 py-1 max-w-[280px]" title="چارەسەرکرنا ئاریشێن دناڤ لاپەرێ دا (char)">
+              <div className="flex items-center gap-1.5 bg-sky-950/20 border border-sky-500/25 rounded-lg px-2 py-1 max-w-[280px]" title="چارەسەرکرنا ئاریشێن دناڤ لاپەرێ دا (Chat / char)">
                 <textarea
                   value={charInstruction}
                   onChange={(e) => setCharInstruction(e.target.value)}
@@ -807,7 +826,7 @@ const Toolbar: React.FC<ToolbarProps> = ({
                 <button
                   onClick={handleRunChar}
                   disabled={isCharProcessing}
-                  title="جێبەجێکرن (char)"
+                  title="جێبەجێکرن (Chat)"
                   className={`
                     flex flex-col items-center justify-center p-1 rounded-md transition-all duration-200 min-w-[2.2rem] h-[28px]
                     ${isCharProcessing 
@@ -815,8 +834,8 @@ const Toolbar: React.FC<ToolbarProps> = ({
                       : 'bg-sky-500 hover:bg-sky-400 text-slate-950 hover:scale-105 active:scale-95 shadow-[0_0_8px_rgba(56,189,248,0.3)]'}
                   `}
                 >
-                  <Icons.Sparkles size={11} className={isCharProcessing ? 'animate-spin' : ''} />
-                  <span className="text-[8px] font-extrabold uppercase tracking-wide mt-0.5">char</span>
+                  <Icons.MessageSquare size={11} className={isCharProcessing ? 'animate-spin' : ''} />
+                  <span className="text-[8px] font-extrabold uppercase tracking-wide mt-0.5">Chat</span>
                 </button>
               </div>
 

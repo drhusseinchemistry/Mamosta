@@ -2,6 +2,145 @@ import React, { useState, useEffect } from 'react';
 import { Icons } from './Icon';
 import { improveTextWithAI, generateQuestionsFromFile, checkServerConfig } from '../services/geminiService';
 
+interface CharStyle {
+  fill?: string;
+  fontWeight?: string;
+  fontStyle?: string;
+  underline?: boolean;
+  [key: string]: any;
+}
+
+interface FabricStyles {
+  [lineIndex: number]: {
+    [charIndex: number]: CharStyle;
+  };
+}
+
+const parseHtmlStyles = (input: string): { plainText: string; styles: FabricStyles } => {
+  let preprocessed = input || "";
+  // Preprocess Markdown bold/italic to HTML tags so the rest of the parsing works seamlessly
+  preprocessed = preprocessed.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
+  preprocessed = preprocessed.replace(/__(.*?)__/g, '<b>$1</b>');
+  preprocessed = preprocessed.replace(/\*(.*?)\*/g, '<i>$1</i>');
+  preprocessed = preprocessed.replace(/_(.*?)_/g, '<i>$1</i>');
+
+  let plainText = "";
+  const styles: FabricStyles = {};
+  
+  let currentLine = 0;
+  let currentChar = 0;
+  
+  const stateStack: CharStyle[] = [];
+  
+  const tagRegex = /(?:<span[^>]*style=["'][^"']*color:\s*(#[0-9a-fA-F]{3,8}|[a-zA-Z]+)[^"']*["'][^>]*>|<font[^>]*color=["']([^"']+)["'][^>]*>|\[color=([^\]]+)\]|<\/span>|<\/font>|\[\/color\]|<b>|\[b\]|<\/b>|\[\/b\]|<i>|\[i\]|<\/i>|\[\/i\]|<u>|\[u\]|<\/u>|\[\/u\]|<[^>]+>|\[[^\]]+\])/gi;
+  
+  let lastIdx = 0;
+  let match;
+  
+  while ((match = tagRegex.exec(preprocessed)) !== null) {
+    const matchIdx = match.index;
+    const matchStr = match[0];
+    
+    const prevText = preprocessed.substring(lastIdx, matchIdx);
+    for (let i = 0; i < prevText.length; i++) {
+      const char = prevText[i];
+      plainText += char;
+      
+      if (char === '\n') {
+        currentLine++;
+        currentChar = 0;
+      } else {
+        const mergedStyle: CharStyle = {};
+        stateStack.forEach(s => {
+          Object.assign(mergedStyle, s);
+        });
+        
+        if (Object.keys(mergedStyle).length > 0) {
+          if (!styles[currentLine]) {
+            styles[currentLine] = {};
+          }
+          styles[currentLine][currentChar] = mergedStyle;
+        }
+        currentChar++;
+      }
+    }
+    
+    const lowerMatch = matchStr.toLowerCase();
+    
+    if (match[1]) {
+      stateStack.push({ fill: match[1] });
+    } else if (match[2]) {
+      stateStack.push({ fill: match[2] });
+    } else if (match[3]) {
+      stateStack.push({ fill: match[3] });
+    } else if (lowerMatch === '<b>' || lowerMatch === '[b]') {
+      stateStack.push({ fontWeight: 'bold' });
+    } else if (lowerMatch === '<i>' || lowerMatch === '[i]') {
+      stateStack.push({ fontStyle: 'italic' });
+    } else if (lowerMatch === '<u>' || lowerMatch === '[u]') {
+      stateStack.push({ underline: true });
+    } else if (
+      lowerMatch === '</span>' || 
+      lowerMatch === '</font>' || 
+      lowerMatch === '[/color]' ||
+      lowerMatch === '</b>' || 
+      lowerMatch === '[/b]' || 
+      lowerMatch === '</i>' || 
+      lowerMatch === '[/i]' || 
+      lowerMatch === '</u>' || 
+      lowerMatch === '[/u]'
+    ) {
+      let targetProp: keyof CharStyle | null = null;
+      if (lowerMatch === '</span>' || lowerMatch === '</font>' || lowerMatch === '[/color]') {
+        targetProp = 'fill';
+      } else if (lowerMatch === '</b>' || lowerMatch === '[/b]') {
+        targetProp = 'fontWeight';
+      } else if (lowerMatch === '</i>' || lowerMatch === '[/i]') {
+        targetProp = 'fontStyle';
+      } else if (lowerMatch === '</u>' || lowerMatch === '[/u]') {
+        targetProp = 'underline';
+      }
+      
+      if (targetProp) {
+        for (let i = stateStack.length - 1; i >= 0; i--) {
+          if (stateStack[i][targetProp] !== undefined) {
+            stateStack.splice(i, 1);
+            break;
+          }
+        }
+      }
+    }
+    
+    lastIdx = tagRegex.lastIndex;
+  }
+  
+  const remainingText = preprocessed.substring(lastIdx);
+  for (let i = 0; i < remainingText.length; i++) {
+    const char = remainingText[i];
+    plainText += char;
+    
+    if (char === '\n') {
+      currentLine++;
+      currentChar = 0;
+    } else {
+      const mergedStyle: CharStyle = {};
+      stateStack.forEach(s => {
+        Object.assign(mergedStyle, s);
+      });
+      
+      if (Object.keys(mergedStyle).length > 0) {
+        if (!styles[currentLine]) {
+          styles[currentLine] = {};
+        }
+        styles[currentLine][currentChar] = mergedStyle;
+      }
+      currentChar++;
+    }
+  }
+  
+  return { plainText, styles };
+};
+
 interface TextFormatterProps {
   canvas: any;
   activeObject: any;
@@ -64,9 +203,14 @@ export const TextFormatter: React.FC<TextFormatterProps> = ({ canvas, activeObje
     items.forEach((item: any) => {
       if (item.type === 'i-text' || item.type === 'text' || item.type === 'textbox') {
         item.set({
+          direction: dir,
           textAlign: dir === 'rtl' ? 'right' : 'left',
           fontFamily: dir === 'rtl' ? 'Noto Sans Arabic' : 'Inter'
         });
+        if (item.isEditing) {
+          item.exitEditing();
+          item.enterEditing();
+        }
         if (typeof item.initDimensions === 'function') {
           item.initDimensions();
         }
@@ -77,9 +221,14 @@ export const TextFormatter: React.FC<TextFormatterProps> = ({ canvas, activeObje
         subItems.forEach((sub: any) => {
           if (sub.type === 'i-text' || sub.type === 'text' || sub.type === 'textbox') {
             sub.set({
+              direction: dir,
               textAlign: dir === 'rtl' ? 'right' : 'left',
               fontFamily: dir === 'rtl' ? 'Noto Sans Arabic' : 'Inter'
             });
+            if (sub.isEditing) {
+              sub.exitEditing();
+              sub.enterEditing();
+            }
             if (typeof sub.initDimensions === 'function') {
               sub.initDimensions();
             }
@@ -144,7 +293,12 @@ export const TextFormatter: React.FC<TextFormatterProps> = ({ canvas, activeObje
       const currentText = activeObject.text || '';
       const result = await improveTextWithAI(apiKey, currentText, aiPrompt);
       if (result) {
-        activeObject.set('text', result);
+        const { plainText, styles: parsedStyles } = parseHtmlStyles(result);
+        activeObject.set({
+          text: plainText,
+          styles: parsedStyles
+        });
+        activeObject.rawHtmlText = result;
         canvas.renderAll();
         onModified();
       } else {
@@ -222,13 +376,22 @@ export const TextFormatter: React.FC<TextFormatterProps> = ({ canvas, activeObje
 
     const syncProperties = () => {
       if (isText) {
-        setFontFamily(activeObject.fontFamily || 'Noto Sans Arabic');
-        setFontSize(Math.round(activeObject.fontSize || 24));
-        setColorValue(activeObject.fill || '#000000');
-        setIsBold(activeObject.fontWeight === 'bold');
-        setIsItalic(activeObject.fontStyle === 'italic');
-        setIsUnderline(!!activeObject.underline);
-        setIsLinethrough(!!activeObject.linethrough);
+        // Helper to get active style of the cursor/selection with a fallback to the object's top-level property
+        const getStyleVal = (prop: string) => {
+          if (activeObject.isEditing && typeof activeObject.getActiveStyle === 'function') {
+            const styleVal = activeObject.getActiveStyle(prop);
+            if (styleVal !== undefined && styleVal !== '') return styleVal;
+          }
+          return activeObject[prop];
+        };
+
+        setFontFamily(getStyleVal('fontFamily') || 'Noto Sans Arabic');
+        setFontSize(Math.round(getStyleVal('fontSize') || 24));
+        setColorValue(getStyleVal('fill') || '#000000');
+        setIsBold(getStyleVal('fontWeight') === 'bold');
+        setIsItalic(getStyleVal('fontStyle') === 'italic');
+        setIsUnderline(!!getStyleVal('underline'));
+        setIsLinethrough(!!getStyleVal('linethrough'));
         setTextAlign(activeObject.textAlign || 'right');
         setTextDirection(activeObject.direction || 'rtl');
         setCharSpacing(activeObject.charSpacing || 0);
@@ -272,16 +435,34 @@ export const TextFormatter: React.FC<TextFormatterProps> = ({ canvas, activeObje
     const onSelected = () => syncProperties();
     activeObject.on('selected', onSelected);
     activeObject.on('modified', onSelected);
+    activeObject.on('changed', onSelected);
+    activeObject.on('selection:changed', onSelected);
 
     return () => {
       activeObject.off('selected', onSelected);
       activeObject.off('modified', onSelected);
+      activeObject.off('changed', onSelected);
+      activeObject.off('selection:changed', onSelected);
     };
   }, [activeObject, isText]);
 
   const updateProperty = (key: string, value: any) => {
     if (!activeObject) return;
-    activeObject.set(key, value);
+    
+    if (isText) {
+      const isEditing = activeObject.isEditing;
+      const hasSelection = typeof activeObject.selectionStart === 'number' && 
+                            typeof activeObject.selectionEnd === 'number' && 
+                            activeObject.selectionStart !== activeObject.selectionEnd;
+      if (isEditing && hasSelection && typeof activeObject.setSelectionStyles === 'function') {
+        activeObject.setSelectionStyles({ [key]: value });
+        activeObject.dirty = true;
+      } else {
+        activeObject.set(key, value);
+      }
+    } else {
+      activeObject.set(key, value);
+    }
     canvas.renderAll();
     onModified();
   };
@@ -343,7 +524,16 @@ export const TextFormatter: React.FC<TextFormatterProps> = ({ canvas, activeObje
     setColorValue(color);
     if (!activeObject) return;
     if (isText) {
-      activeObject.set('fill', color);
+      const isEditing = activeObject.isEditing;
+      const hasSelection = typeof activeObject.selectionStart === 'number' && 
+                            typeof activeObject.selectionEnd === 'number' && 
+                            activeObject.selectionStart !== activeObject.selectionEnd;
+      if (isEditing && hasSelection && typeof activeObject.setSelectionStyles === 'function') {
+        activeObject.setSelectionStyles({ fill: color });
+        activeObject.dirty = true;
+      } else {
+        activeObject.set('fill', color);
+      }
     } else {
       activeObject.set('stroke', color);
       // If it's a shape with a filled color, color it too
@@ -388,9 +578,14 @@ export const TextFormatter: React.FC<TextFormatterProps> = ({ canvas, activeObje
     setTextDirection(direction);
     if (activeObject) {
       activeObject.set({
+        direction: direction,
         textAlign: direction === 'rtl' ? 'right' : 'left',
         fontFamily: direction === 'rtl' ? 'Noto Sans Arabic' : 'Inter'
       });
+      if (activeObject.isEditing) {
+        activeObject.exitEditing();
+        activeObject.enterEditing();
+      }
       if (typeof activeObject.initDimensions === 'function') {
         activeObject.initDimensions();
       }

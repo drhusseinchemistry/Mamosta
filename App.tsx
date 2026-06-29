@@ -3,11 +3,152 @@ import Toolbar from './components/Toolbar';
 import Sidebar from './components/Sidebar';
 import PageEditor, { createTableGroup } from './components/PageEditor';
 import { createMathSymbolGroup } from './utils/mathSymbols';
+import { createGraphFabricGroup } from './utils/graphDrawer';
 import { TextFormatter } from './components/TextFormatter';
 import { EditorState, PageData, ToolType } from './types';
 import { initializePDFJS, loadPDFDocument, renderPDFPageToDataURL } from './services/pdfService';
-import { transcribeAudio, performOCR, validateApiKey, lastValidationError, generateMathFromImage, checkServerConfig, troubleshootPage } from './services/geminiService';
+import { transcribeAudio, performOCR, validateApiKey, lastValidationError, generateMathFromImage, checkServerConfig, troubleshootPage, troubleshootKpdfPage } from './services/geminiService';
 import { Icons } from './components/Icon';
+
+interface CharStyle {
+  fill?: string;
+  fontWeight?: string;
+  fontStyle?: string;
+  underline?: boolean;
+  [key: string]: any;
+}
+
+interface FabricStyles {
+  [lineIndex: number]: {
+    [charIndex: number]: CharStyle;
+  };
+}
+
+const parseHtmlStyles = (input: string): { plainText: string; styles: FabricStyles } => {
+  let preprocessed = input || "";
+  // Preprocess Markdown bold/italic to HTML tags so the rest of the parsing works seamlessly
+  preprocessed = preprocessed.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
+  preprocessed = preprocessed.replace(/__(.*?)__/g, '<b>$1</b>');
+  preprocessed = preprocessed.replace(/\*(.*?)\*/g, '<i>$1</i>');
+  preprocessed = preprocessed.replace(/_(.*?)_/g, '<i>$1</i>');
+
+  let plainText = "";
+  const styles: FabricStyles = {};
+  
+  let currentLine = 0;
+  let currentChar = 0;
+  
+  const stateStack: CharStyle[] = [];
+  
+  const tagRegex = /(?:<span[^>]*style=["'][^"']*color:\s*(#[0-9a-fA-F]{3,8}|[a-zA-Z]+)[^"']*["'][^>]*>|<font[^>]*color=["']([^"']+)["'][^>]*>|\[color=([^\]]+)\]|<\/span>|<\/font>|\[\/color\]|<b>|\[b\]|<\/b>|\[\/b\]|<i>|\[i\]|<\/i>|\[\/i\]|<u>|\[u\]|<\/u>|\[\/u\]|<[^>]+>|\[[^\]]+\])/gi;
+  
+  let lastIdx = 0;
+  let match;
+  
+  while ((match = tagRegex.exec(preprocessed)) !== null) {
+    const matchIdx = match.index;
+    const matchStr = match[0];
+    
+    // Add text preceding the tag to our plain text
+    const prevText = preprocessed.substring(lastIdx, matchIdx);
+    for (let i = 0; i < prevText.length; i++) {
+      const char = prevText[i];
+      plainText += char;
+      
+      if (char === '\n') {
+        currentLine++;
+        currentChar = 0;
+      } else {
+        const mergedStyle: CharStyle = {};
+        stateStack.forEach(s => {
+          Object.assign(mergedStyle, s);
+        });
+        
+        if (Object.keys(mergedStyle).length > 0) {
+          if (!styles[currentLine]) {
+            styles[currentLine] = {};
+          }
+          styles[currentLine][currentChar] = mergedStyle;
+        }
+        currentChar++;
+      }
+    }
+    
+    const lowerMatch = matchStr.toLowerCase();
+    
+    if (match[1]) {
+      stateStack.push({ fill: match[1] });
+    } else if (match[2]) {
+      stateStack.push({ fill: match[2] });
+    } else if (match[3]) {
+      stateStack.push({ fill: match[3] });
+    } else if (lowerMatch === '<b>' || lowerMatch === '[b]') {
+      stateStack.push({ fontWeight: 'bold' });
+    } else if (lowerMatch === '<i>' || lowerMatch === '[i]') {
+      stateStack.push({ fontStyle: 'italic' });
+    } else if (lowerMatch === '<u>' || lowerMatch === '[u]') {
+      stateStack.push({ underline: true });
+    } else if (
+      lowerMatch === '</span>' || 
+      lowerMatch === '</font>' || 
+      lowerMatch === '[/color]' ||
+      lowerMatch === '</b>' || 
+      lowerMatch === '[/b]' || 
+      lowerMatch === '</i>' || 
+      lowerMatch === '[/i]' || 
+      lowerMatch === '</u>' || 
+      lowerMatch === '[/u]'
+    ) {
+      let targetProp: keyof CharStyle | null = null;
+      if (lowerMatch === '</span>' || lowerMatch === '</font>' || lowerMatch === '[/color]') {
+        targetProp = 'fill';
+      } else if (lowerMatch === '</b>' || lowerMatch === '[/b]') {
+        targetProp = 'fontWeight';
+      } else if (lowerMatch === '</i>' || lowerMatch === '[/i]') {
+        targetProp = 'fontStyle';
+      } else if (lowerMatch === '</u>' || lowerMatch === '[/u]') {
+        targetProp = 'underline';
+      }
+      
+      if (targetProp) {
+        for (let i = stateStack.length - 1; i >= 0; i--) {
+          if (stateStack[i][targetProp] !== undefined) {
+            stateStack.splice(i, 1);
+            break;
+          }
+        }
+      }
+    }
+    
+    lastIdx = tagRegex.lastIndex;
+  }
+  
+  const remainingText = preprocessed.substring(lastIdx);
+  for (let i = 0; i < remainingText.length; i++) {
+    const char = remainingText[i];
+    plainText += char;
+    
+    if (char === '\n') {
+      currentLine++;
+      currentChar = 0;
+    } else {
+      const mergedStyle: CharStyle = {};
+      stateStack.forEach(s => {
+        Object.assign(mergedStyle, s);
+      });
+      
+      if (Object.keys(mergedStyle).length > 0) {
+        if (!styles[currentLine]) {
+          styles[currentLine] = {};
+        }
+        styles[currentLine][currentChar] = mergedStyle;
+      }
+      currentChar++;
+    }
+  }
+  
+  return { plainText, styles };
+};
 
 const ThemeStyleInjector: React.FC<{ theme: string }> = ({ theme }) => {
   let primary = '#3b82f6'; // default tailwind blue
@@ -454,8 +595,9 @@ const App: React.FC = () => {
           if (elem.type === 'text') {
             if (!elem.text) continue;
             const isRtl = isRtlText(elem.text);
-            const textWidth = elem.width || Math.max(100, Math.min(350, (elem.text.length * fSize * 0.75) + 16));
-            const textObj = new window.fabric.Textbox(elem.text, {
+            const { plainText, styles: parsedStyles } = parseHtmlStyles(elem.text);
+            const textWidth = elem.width || Math.max(100, Math.min(350, (plainText.length * fSize * 0.75) + 16));
+            const textObj = new window.fabric.Textbox(plainText, {
               left: left,
               top: top,
               width: textWidth,
@@ -468,8 +610,10 @@ const App: React.FC = () => {
               textAlign: isRtl ? 'right' : 'left',
               angle: angle,
               splitByGrapheme: true,
-              minWidth: 10
+              minWidth: 10,
+              styles: parsedStyles
             });
+            textObj.rawHtmlText = elem.text;
             activeCanvas.add(textObj);
             addedObjects.push(textObj);
           } else if (elem.type === 'line') {
@@ -669,7 +813,8 @@ const App: React.FC = () => {
 
             if (elem.type === 'text') {
               if (!elem.text) continue;
-              const textObj = new window.fabric.Textbox(elem.text, {
+              const { plainText, styles: parsedStyles } = parseHtmlStyles(elem.text);
+              const textObj = new window.fabric.Textbox(plainText, {
                 left: currentLeft,
                 top: currentTop,
                 width: elem.width || elemWidth || 250,
@@ -681,8 +826,10 @@ const App: React.FC = () => {
                 originY: 'center',
                 textAlign: lineIsRtl ? 'right' : 'left',
                 splitByGrapheme: true,
-                minWidth: 10
+                minWidth: 10,
+                styles: parsedStyles
               });
+              textObj.rawHtmlText = elem.text;
               activeCanvas.add(textObj);
               addedObjects.push(textObj);
             } else if (elem.type === 'line') {
@@ -1025,9 +1172,44 @@ const App: React.FC = () => {
     }));
 
     try {
-      const currentElements = getElementsFromCanvas(activeCanvas);
+      // Discard active objects to avoid saving selection box
+      const activeObj = activeCanvas.getActiveObject();
+      if (activeObj) {
+        activeCanvas.discardActiveObject();
+      }
 
-      const jsonString = await troubleshootPage(apiKey, currentElements, instruction);
+      // 1. Capture the current active page and canvas as a .kpdf format JSON
+      const activePageData = pages.find(p => p.pageNumber === activePage);
+      
+      // Let's create a lightweight pages list without the heavy page base64 images to drastically reduce payload size
+      const targetPagesList = activePageData ? [activePageData] : pages;
+      const lightweightPages = targetPagesList.map(p => ({
+        pageNumber: p.pageNumber,
+        viewport: p.viewport,
+        image: "" // Strip the massive base64 image data to avoid huge payload size issues and timeouts
+      }));
+
+      const projectKpdf = {
+        version: "1.0",
+        pages: lightweightPages,
+        canvases: {
+          [activePage]: activeCanvas.toJSON()
+        }
+      };
+
+      // Generate canvas snapshot image as base64 to allow Gemini to visually process page
+      const canvasSnapshotUrl = activeCanvas.toDataURL({
+        format: 'jpeg',
+        quality: 0.85
+      });
+      if (activeObj) {
+        activeCanvas.setActiveObject(activeObj);
+        activeCanvas.renderAll();
+      }
+      const cleanSnapshotBase64 = canvasSnapshotUrl.includes(",") ? canvasSnapshotUrl.split(",")[1] : canvasSnapshotUrl;
+
+      // 2. Send .kpdf and user prompt directly to the AI
+      const jsonString = await troubleshootKpdfPage(apiKey, projectKpdf, instruction, cleanSnapshotBase64);
       
       let cleanJsonString = jsonString.trim();
       if (cleanJsonString.startsWith('```')) {
@@ -1047,434 +1229,78 @@ const App: React.FC = () => {
           throw e;
         }
       }
-      if (!data || !Array.isArray(data.elements)) {
-        throw new Error("داتای وەرگیراو نە گونجاوە.");
-      }
 
-      const history = getPageHistory(activePage);
-      history.undoStack.push(JSON.stringify(activeCanvas.toJSON()));
-      history.redoStack = [];
+      // 3. Extract canvas state from response and load it back into the page seamlessly
+      const canvasJson = data.canvases?.[activePage] || data.canvases?.[String(activePage)] || Object.values(data.canvases || {})[0];
 
-      const objects = activeCanvas.getObjects();
-      while (objects.length > 0) {
-        activeCanvas.remove(objects[0]);
-      }
+      if (canvasJson) {
+        // Save current state to undo history before overwriting
+        const history = getPageHistory(activePage);
+        history.undoStack.push(JSON.stringify(activeCanvas.toJSON()));
+        history.redoStack = [];
 
-      const elements = data.elements;
-      const center = activeCanvas.getVpCenter();
-      let currentTop = center.y - 120;
-      const textColor = editorState.strokeColor || '#1f2937';
-      
-      const addedObjects: any[] = [];
-
-      const isRtlText = (text: string): boolean => {
-        const rtlRegex = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
-        return rtlRegex.test(text);
-      };
-
-      const hasCoordinates = elements.some((elem: any) => elem.x !== undefined && elem.y !== undefined);
-
-      if (hasCoordinates) {
-        for (const elem of elements) {
-          if (elem.type === 'newline') continue;
-
-          const fSize = elem.fontSize || 14;
-          const elementColor = elem.color || textColor;
-          const angle = elem.angle !== undefined ? elem.angle : 0;
-          
-          const left = center.x + (elem.x || 0);
-          const top = center.y + (elem.y || 0);
-
-          if (elem.type === 'text') {
-            if (!elem.text) continue;
-            const isRtl = isRtlText(elem.text);
-            const textWidth = elem.width || Math.max(100, Math.min(350, (elem.text.length * fSize * 0.75) + 16));
-            const textObj = new window.fabric.Textbox(elem.text, {
-              left: left,
-              top: top,
-              width: textWidth,
-              fontSize: fSize,
-              fill: elementColor,
-              fontFamily: 'Noto Sans Arabic, Inter, sans-serif',
-              selectable: true,
-              originX: 'center',
-              originY: 'center',
-              textAlign: isRtl ? 'right' : 'left',
-              angle: angle,
-              splitByGrapheme: true,
-              minWidth: 10
-            });
-            activeCanvas.add(textObj);
-            addedObjects.push(textObj);
-          } else if (elem.type === 'line') {
-            const w = elem.width || 120;
-            const lineObj = new window.fabric.Line([-w/2, 0, w/2, 0], {
-              stroke: elementColor,
-              strokeWidth: elem.strokeWidth || 2,
-              selectable: true,
-              originX: 'center',
-              originY: 'center',
-              left: left,
-              top: top,
-              angle: angle
-            });
-            activeCanvas.add(lineObj);
-            addedObjects.push(lineObj);
-          } else if (elem.type === 'arrow') {
-            const w = elem.width || 80;
-            const arrowShaft = new window.fabric.Line([-w/2, 0, w/2 - 6, 0], {
-              stroke: elementColor,
-              strokeWidth: elem.strokeWidth || 3,
-              originX: 'center',
-              originY: 'center'
-            });
-            const arrowHead = new window.fabric.Triangle({
-              left: w/2 - 3,
-              top: 0,
-              width: 12,
-              height: 12,
-              fill: elementColor,
-              angle: 90,
-              originX: 'center',
-              originY: 'center'
-            });
-            const arrowGroup = new window.fabric.Group([arrowShaft, arrowHead], {
-              left: left,
-              top: top,
-              angle: angle,
-              selectable: true,
-              hasControls: true
-            });
-            activeCanvas.add(arrowGroup);
-            addedObjects.push(arrowGroup);
-          } else if (elem.type === 'square') {
-            const size = elem.width || elem.height || 40;
-            const squareObj = new window.fabric.Rect({
-              left: left,
-              top: top,
-              width: size,
-              height: size,
-              fill: 'transparent',
-              stroke: elementColor,
-              strokeWidth: elem.strokeWidth || 2,
-              strokeUniform: true,
-              selectable: true,
-              originX: 'center',
-              originY: 'center',
-              angle: angle
-            });
-            activeCanvas.add(squareObj);
-            addedObjects.push(squareObj);
-          } else if (elem.type === 'rectangle') {
-            const rw = elem.width || 60;
-            const rh = elem.height || 40;
-            const rectObj = new window.fabric.Rect({
-              left: left,
-              top: top,
-              width: rw,
-              height: rh,
-              fill: 'transparent',
-              stroke: elementColor,
-              strokeWidth: elem.strokeWidth || 2,
-              strokeUniform: true,
-              selectable: true,
-              originX: 'center',
-              originY: 'center',
-              angle: angle
-            });
-            activeCanvas.add(rectObj);
-            addedObjects.push(rectObj);
-          } else if (elem.type === 'image_icon') {
-            const emoji = elem.text || '🫀';
-            const iconObj = new window.fabric.IText(emoji, {
-              left: left,
-              top: top,
-              fontSize: elem.fontSize || 38,
-              selectable: true,
-              originX: 'center',
-              originY: 'center',
-              angle: angle
-            });
-            activeCanvas.add(iconObj);
-            addedObjects.push(iconObj);
-          } else {
-            const mathGroup = createMathSymbolGroup(
-              elem.type, 
-              left, 
-              top, 
-              textColor, 
-              {
-                numerator: elem.numerator,
-                denominator: elem.denominator,
-                topText: elem.topText,
-                bottomText: elem.bottomText,
-              }
-            );
-
-            if (mathGroup) {
-              mathGroup.set({
-                originX: 'center',
-                originY: 'center',
-                left: left,
-                top: top,
-                angle: angle
-              });
-              activeCanvas.add(mathGroup);
-              addedObjects.push(mathGroup);
-            }
-          }
-        }
-      } else {
-        const linesOfElements: any[][] = [[]];
-        for (const elem of elements) {
-          if (elem.type === 'newline') {
-            linesOfElements.push([]);
-          } else {
-            linesOfElements[linesOfElements.length - 1].push(elem);
-          }
-        }
-
-        for (const line of linesOfElements) {
-          if (line.length === 0) {
-            currentTop += 65;
-            continue;
-          }
-
-          const lineIsRtl = line.some((elem: any) => elem.type === 'text' && elem.text && isRtlText(elem.text));
-
-          let totalLineWidth = 0;
-          const elemWidths = line.map((elem: any) => {
-            const fSize = elem.fontSize || 14;
-            if (elem.type === 'text') {
-              if (!elem.text) return 0;
-              return (elem.text.length * fSize * 0.55) + 12;
-            } else if (elem.type === 'line') {
-              return (elem.width || 120) + 12;
-            } else if (elem.type === 'arrow') {
-              return (elem.width || 80) + 12;
-            } else if (elem.type === 'square') {
-              const size = elem.width || elem.height || 40;
-              return size + 12;
-            } else if (elem.type === 'rectangle') {
-              const rw = elem.width || 60;
-              return rw + 12;
-            } else if (elem.type === 'image_icon') {
-              return (elem.fontSize || 38) + 12;
-            } else {
-              let estWidth = 50;
-              if (elem.type === 'fraction') {
-                const numLen = elem.numerator ? elem.numerator.length : 1;
-                const denLen = elem.denominator ? elem.denominator.length : 1;
-                const maxLen = Math.max(numLen, denLen);
-                estWidth = (maxLen * 12) + 24;
-              } else if (elem.type === 'sigma_sum' || elem.type === 'product' || elem.type === 'definite_integral') {
-                estWidth = 55;
-              } else if (elem.type === 'limit') {
-                estWidth = 65;
-              }
-              return estWidth + 10;
-            }
-          });
-
-          totalLineWidth = elemWidths.reduce((sum, w) => sum + w, 0);
-
-          let currentLeft = 0;
-          if (lineIsRtl) {
-            currentLeft = center.x + (totalLineWidth / 2);
-          } else {
-            currentLeft = center.x - (totalLineWidth / 2);
-          }
-
-          for (let i = 0; i < line.length; i++) {
-            const elem = line[i];
-            const elemWidth = elemWidths[i];
-            if (elemWidth === 0) continue;
-
-            const fSize = elem.fontSize || 14;
-            const elementColor = elem.color || textColor;
-
-            if (elem.type === 'text') {
-              if (!elem.text) continue;
-              const textObj = new window.fabric.Textbox(elem.text, {
-                left: currentLeft,
-                top: currentTop,
-                width: elem.width || elemWidth || 250,
-                fontSize: fSize,
-                fill: elementColor,
-                fontFamily: 'Noto Sans Arabic, Inter, sans-serif',
-                selectable: true,
-                originX: lineIsRtl ? 'right' : 'left',
-                originY: 'center',
-                textAlign: lineIsRtl ? 'right' : 'left',
-                splitByGrapheme: true,
-                minWidth: 10
-              });
-              activeCanvas.add(textObj);
-              addedObjects.push(textObj);
-            } else if (elem.type === 'line') {
-              const w = elem.width || 120;
-              const lineObj = new window.fabric.Line(
-                lineIsRtl 
-                  ? [currentLeft, currentTop, currentLeft - w, currentTop]
-                  : [currentLeft, currentTop, currentLeft + w, currentTop], 
-                {
-                  stroke: elementColor,
-                  strokeWidth: elem.strokeWidth || 2,
-                  selectable: true,
-                  originX: lineIsRtl ? 'right' : 'left',
-                  originY: 'center'
+        activeCanvas.loadFromJSON(canvasJson, () => {
+          try {
+            // If the page has an image background, restore it!
+            if (activePageData && activePageData.image) {
+              window.fabric.Image.fromURL(activePageData.image, (img: any) => {
+                try {
+                  if (!img) {
+                    activeCanvas.renderAll();
+                    saveCanvasState(activePage);
+                    setEditorState(prev => ({ 
+                      ...prev, 
+                      isProcessing: false, 
+                      statusMessage: 'لاپەڕە بە سەرکەوتوویی ڕێکخرایەوە و چارەسەرکرا!' 
+                    }));
+                    return;
+                  }
+                  activeCanvas.setBackgroundImage(img, () => {
+                    activeCanvas.renderAll();
+                    saveCanvasState(activePage);
+                    setEditorState(prev => ({ 
+                      ...prev, 
+                      isProcessing: false, 
+                      statusMessage: 'لاپەڕە بە سەرکەوتوویی ڕێکخرایەوە و چارەسەرکرا!' 
+                    }));
+                  }, {
+                    scaleX: activeCanvas.width! / (img.width || 1),
+                    scaleY: activeCanvas.height! / (img.height || 1)
+                  });
+                } catch (innerErr: any) {
+                  console.error("Error setting background image asynchronously:", innerErr);
+                  activeCanvas.renderAll();
+                  saveCanvasState(activePage);
+                  setEditorState(prev => ({ 
+                    ...prev, 
+                    isProcessing: false, 
+                    statusMessage: 'لاپەڕە بە سەرکەوتوویی ڕێکخرایەوە و چارەسەرکرا!' 
+                  }));
                 }
-              );
-              activeCanvas.add(lineObj);
-              addedObjects.push(lineObj);
-            } else if (elem.type === 'arrow') {
-              const w = elem.width || 80;
-              let arrowGroup;
-              if (lineIsRtl) {
-                const arrowShaft = new window.fabric.Line([currentLeft, currentTop, currentLeft - w + 10, currentTop], {
-                  stroke: elementColor,
-                  strokeWidth: elem.strokeWidth || 3,
-                  selectable: true,
-                  originX: 'right',
-                  originY: 'center'
-                });
-                const arrowHead = new window.fabric.Triangle({
-                  left: currentLeft - w,
-                  top: currentTop,
-                  width: 12,
-                  height: 12,
-                  fill: elementColor,
-                  angle: 270,
-                  originX: 'center',
-                  originY: 'center',
-                  selectable: true
-                });
-                arrowGroup = new window.fabric.Group([arrowShaft, arrowHead], {
-                  selectable: true,
-                  hasControls: true
-                });
-              } else {
-                const arrowShaft = new window.fabric.Line([currentLeft, currentTop, currentLeft + w - 10, currentTop], {
-                  stroke: elementColor,
-                  strokeWidth: elem.strokeWidth || 3,
-                  selectable: true,
-                  originX: 'left',
-                  originY: 'center'
-                });
-                const arrowHead = new window.fabric.Triangle({
-                  left: currentLeft + w,
-                  top: currentTop,
-                  width: 12,
-                  height: 12,
-                  fill: elementColor,
-                  angle: 90,
-                  originX: 'center',
-                  originY: 'center',
-                  selectable: true
-                });
-                arrowGroup = new window.fabric.Group([arrowShaft, arrowHead], {
-                  selectable: true,
-                  hasControls: true
-                });
-              }
-              activeCanvas.add(arrowGroup);
-              addedObjects.push(arrowGroup);
-            } else if (elem.type === 'square') {
-              const size = elem.width || elem.height || 40;
-              const squareObj = new window.fabric.Rect({
-                left: lineIsRtl ? currentLeft - size : currentLeft,
-                top: currentTop - size/2,
-                width: size,
-                height: size,
-                fill: 'transparent',
-                stroke: elementColor,
-                strokeWidth: elem.strokeWidth || 2,
-                strokeUniform: true,
-                selectable: true
               });
-              activeCanvas.add(squareObj);
-              addedObjects.push(squareObj);
-            } else if (elem.type === 'rectangle') {
-              const rw = elem.width || 60;
-              const rh = elem.height || 40;
-              const rectObj = new window.fabric.Rect({
-                left: lineIsRtl ? currentLeft - rw : currentLeft,
-                top: currentTop - rh/2,
-                width: rw,
-                height: rh,
-                fill: 'transparent',
-                stroke: elementColor,
-                strokeWidth: elem.strokeWidth || 2,
-                strokeUniform: true,
-                selectable: true
-              });
-              activeCanvas.add(rectObj);
-              addedObjects.push(rectObj);
-            } else if (elem.type === 'image_icon') {
-              const emoji = elem.text || '🫀';
-              const iconObj = new window.fabric.IText(emoji, {
-                left: currentLeft,
-                top: currentTop,
-                fontSize: elem.fontSize || 38,
-                selectable: true,
-                originX: lineIsRtl ? 'right' : 'left',
-                originY: 'center',
-              });
-              activeCanvas.add(iconObj);
-              addedObjects.push(iconObj);
             } else {
-              const mathGroup = createMathSymbolGroup(
-                elem.type, 
-                currentLeft, 
-                currentTop, 
-                textColor, 
-                {
-                  numerator: elem.numerator,
-                  denominator: elem.denominator,
-                  topText: elem.topText,
-                  bottomText: elem.bottomText,
-                }
-              );
-
-              if (mathGroup) {
-                mathGroup.set({
-                  originX: lineIsRtl ? 'right' : 'left',
-                  originY: 'center',
-                  left: currentLeft,
-                  top: currentTop,
-                });
-                
-                activeCanvas.add(mathGroup);
-                addedObjects.push(mathGroup);
-              }
+              activeCanvas.renderAll();
+              saveCanvasState(activePage);
+              setEditorState(prev => ({ 
+                ...prev, 
+                isProcessing: false, 
+                statusMessage: 'لاپەڕە بە سەرکەوتوویی ڕێکخرایەوە و چارەسەرکرا!' 
+              }));
             }
-
-            if (lineIsRtl) {
-              currentLeft -= elemWidth;
-            } else {
-              currentLeft += elemWidth;
-            }
+          } catch (loadErr: any) {
+            console.error("Error inside loadFromJSON callback:", loadErr);
+            activeCanvas.renderAll();
+            saveCanvasState(activePage);
+            setEditorState(prev => ({ 
+              ...prev, 
+              isProcessing: false, 
+              statusMessage: 'لاپەڕە بە سەرکەوتوویی ڕێکخرایەوە و چارەسەرکرا!' 
+            }));
           }
-
-          currentTop += 65;
-        }
-      }
-
-      if (addedObjects.length > 0) {
-        const sel = new window.fabric.ActiveSelection(addedObjects, {
-          canvas: activeCanvas,
         });
-        activeCanvas.setActiveObject(sel);
+      } else {
+        throw new Error("داتای لاپەڕەی نوێ نەدۆزرایەوە لە وەڵامی ژیریی دەستکرددا.");
       }
-
-      activeCanvas.renderAll();
-      saveCanvasState(activePage);
-      
-      setEditorState(prev => ({ 
-        ...prev, 
-        isProcessing: false, 
-        statusMessage: 'لاپەڕە بە سەرکەوتوویی ڕێکخرایەوە و چارەسەرکرا!' 
-      }));
     } catch (error: any) {
       console.error("Troubleshooting layout failed:", error);
       alert("کێشەیەک ڕوویدا لە چارەسەرکردندا: " + (error.message || error));
@@ -1493,17 +1319,48 @@ const App: React.FC = () => {
       const activeObj = activeCanvas.getActiveObject();
       if (activeObj && (activeObj.isType('i-text') || activeObj.isType('text') || activeObj.isType('textbox') || activeObj.type === 'textbox')) {
         const currentText = activeObj.text || '';
-        // If it was the default placeholder "بنڤیسە", replace it entirely
+        const { plainText, styles: parsedStyles } = parseHtmlStyles(text);
+        
+        let newText = '';
         if (currentText === 'بنڤیسە') {
-          activeObj.set('text', text);
+          newText = plainText;
+          // Apply new styles directly
+          activeObj.set('styles', parsedStyles);
         } else {
-          activeObj.set('text', currentText + ' ' + text);
+          const originalLines = currentText.split('\n');
+          const lastLineIndex = originalLines.length - 1;
+          const lastLineCharCount = originalLines[lastLineIndex].length;
+          
+          // The appended text is ' ' + plainText
+          const { plainText: appendedPlain, styles: appendedStyles } = parseHtmlStyles(' ' + text);
+          
+          if (!activeObj.styles) {
+            activeObj.styles = {};
+          }
+          
+          Object.keys(appendedStyles).forEach((lStr) => {
+            const l = parseInt(lStr, 10);
+            const targetLine = lastLineIndex + l;
+            if (!activeObj.styles[targetLine]) {
+              activeObj.styles[targetLine] = {};
+            }
+            const offset = (l === 0) ? lastLineCharCount : 0;
+            Object.keys(appendedStyles[l]).forEach((cStr) => {
+              const c = parseInt(cStr, 10);
+              activeObj.styles[targetLine][c + offset] = appendedStyles[l][c];
+            });
+          });
+          newText = currentText + appendedPlain;
         }
+        
+        activeObj.set('text', newText);
+        activeObj.rawHtmlText = (activeObj.rawHtmlText || currentText) + ' ' + text;
         activeCanvas.renderAll();
         return;
       }
 
-      const iText = new window.fabric.Textbox(text, {
+      const { plainText, styles: parsedStyles } = parseHtmlStyles(text);
+      const iText = new window.fabric.Textbox(plainText, {
         left: 50,
         top: 50,
         fontSize: 18,
@@ -1512,8 +1369,10 @@ const App: React.FC = () => {
         textAlign: 'right',
         width: 350,
         splitByGrapheme: true,
-        minWidth: 10
+        minWidth: 10,
+        styles: parsedStyles
       });
+      iText.rawHtmlText = text;
       activeCanvas.add(iText);
       activeCanvas.setActiveObject(iText);
       activeCanvas.renderAll();
@@ -1711,6 +1570,10 @@ const App: React.FC = () => {
       newObj.set({ scaleX: 1.5, scaleY: 1.5 });
     } else if (elementType === 'table') {
       newObj = createTableGroup(3, 3, 4, 110, 40, Array(9).fill(''), center.x, center.y, strokeColor, strokeWidth);
+    } else if (elementType === 'graph') {
+      newObj = createGraphFabricGroup(center.x, center.y, {
+        lineColor: strokeColor
+      });
     }
     
     if (newObj) {
@@ -2266,7 +2129,7 @@ const App: React.FC = () => {
 
         {/* Sidebar for Text & Object Formatting (Right Side) */}
         {pages.length > 0 && activeTextSelection && showFormatterSidebar && (
-          <div className="w-full md:w-[240px] border-t md:border-t-0 md:border-l border-zinc-800 bg-zinc-950 flex flex-col shrink-0 z-30">
+          <div className="w-full md:w-[240px] border-t md:border-t-0 md:border-l border-zinc-800 bg-zinc-950 flex flex-col shrink-0 md:z-30 max-md:fixed max-md:top-[125px] max-md:left-4 max-md:right-4 max-md:mx-auto max-md:w-auto max-md:max-w-md max-md:z-50 max-md:rounded-xl max-md:border max-md:shadow-2xl max-md:max-h-[38vh] max-md:overflow-hidden">
             <TextFormatter 
               canvas={activeTextSelection.canvas}
               activeObject={activeTextSelection.object}

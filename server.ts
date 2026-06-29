@@ -32,7 +32,14 @@ async function startServer() {
         return res.status(400).json({ error: "Missing audioBase64 data" });
       }
 
-      const ai = new GoogleGenAI({ apiKey });
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          }
+        }
+      });
 
       let promptText = "Transcribe this audio exactly as spoken. Return ONLY the transcribed text.";
       if (language === 'ku_badini') {
@@ -53,7 +60,7 @@ async function startServer() {
       }
 
       const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash", // Use extremely fast and stable model for STT
+        model: "gemini-3.5-flash", // Use extremely fast and stable model for STT
         contents: {
           parts: [
             { text: promptText },
@@ -87,9 +94,16 @@ async function startServer() {
         return res.status(400).json({ error: "Missing imageBase64 data" });
       }
 
-      const ai = new GoogleGenAI({ apiKey });
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          }
+        }
+      });
       const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-3.5-flash",
         contents: {
           parts: [
             { 
@@ -121,7 +135,14 @@ async function startServer() {
       }
 
       const { currentText, instruction } = req.body;
-      const ai = new GoogleGenAI({ apiKey });
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          }
+        }
+      });
 
       let promptText = "";
       if (!instruction || !instruction.trim()) {
@@ -149,7 +170,7 @@ ${currentText}
       }
 
       const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-3.5-flash",
         contents: promptText,
       });
 
@@ -173,7 +194,14 @@ ${currentText}
         return res.status(400).json({ error: "Missing fileBase64 data" });
       }
 
-      const ai = new GoogleGenAI({ apiKey });
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          }
+        }
+      });
 
       const userPrompt = customInstruction && customInstruction.trim() 
         ? `Generate/extract questions based on this file according to this instruction: "${customInstruction}". 
@@ -184,7 +212,7 @@ ${currentText}
 - Do not write any conversational preamble or markdown chat introduction. Return ONLY the final clean questions.`;
 
       const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-3.5-flash",
         contents: [
           { text: userPrompt },
           {
@@ -283,7 +311,7 @@ RECREATION & LAYOUT RULES:
 CRITICAL: Return ONLY valid, minified JSON matching the schema above. Do NOT wrap it in markdown codeblocks (no \`\`\`json ... \`\`\`), do NOT write any introductory or conversational text. Return only the JSON string starting with { and ending with }.`;
 
       const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-3.5-flash",
         contents: [
           { text: systemPrompt },
           {
@@ -292,7 +320,10 @@ CRITICAL: Return ONLY valid, minified JSON matching the schema above. Do NOT wra
               data: imageBase64
             }
           }
-        ]
+        ],
+        config: {
+          responseMimeType: "application/json"
+        }
       });
 
       res.json({ text: response.text || "" });
@@ -310,11 +341,18 @@ CRITICAL: Return ONLY valid, minified JSON matching the schema above. Do NOT wra
         return res.status(400).json({ error: "Server GEMINI_API_KEY is not configured" });
       }
 
-      const { elements, instruction } = req.body;
-      const ai = new GoogleGenAI({ apiKey });
+      const { elements, instruction, imageBase64 } = req.body;
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          }
+        }
+      });
 
       const systemPrompt = `You are an expert AI educational content designer, layout organizer, and troubleshooting engine.
-You are given a JSON list of vector educational/canvas objects (textboxes, lines, shapes, math/chemistry structures) currently rendered on a workspace.
+You are given a JSON list of vector educational/canvas objects (textboxes, lines, shapes, math/chemistry structures) currently rendered on a workspace, and an optional visual snapshot of the page.
 The user wants you to modify, correct, rearrange, and fix this page based on their instruction.
 
 User Instruction: "${instruction || 'Fix and arrange the page elements'}"
@@ -325,10 +363,10 @@ CRITICAL GOALS & RULES:
    - type: "text" | "fraction" | "sigma_sum" | "product" | "definite_integral" | "limit" | "newline" | "line" | "image_icon" | "arrow" | "square" | "rectangle"
    - text, numerator, denominator, topText, bottomText, color, fontSize, angle, width, height, etc.
 2. Carefully troubleshoot and correct:
-   - Spelling, vocabulary, and phrasing errors in Kurdish (Badini/Sorani Arabic script), Arabic, or English text. Double-check all Bahdini Kurdish letters ('ڤ', 'چ', 'پ', 'گ', 'ژ', 'ێ', 'ۆ', 'ڕ', 'ڵ'). For example, change any misspelled words to pure, standard Bahdini Kurdish.
+   - Spelling, vocabulary, and phrasing errors in Kurdish (Bahdini/Sorani Arabic script), Arabic, or English text. Double-check all Bahdini Kurdish letters ('ڤ', 'چ', 'پ', 'گ', 'ژ', 'ێ', 'ۆ', 'ڕ', 'ڵ'). For example, change any misspelled words to pure, standard Bahdini Kurdish.
    - Symmetrically align and position elements. If things are messy, overlap, or misaligned, adjust their x and y coordinates so they look like a premium, professional publication.
    - Arrange diagrams, geometric shapes, flowcharts, or branching structures cleanly with parallel coordinate alignments.
-3. You are fully empowered to add new elements, delete unnecessary elements, edit text content, resize elements, or change layout coordinates.
+3. If elements are currently empty (or missing some parts visible on the image), read the text/math/shapes from the provided visual snapshot of the page and create them as high-quality vector elements in the correct coordinates!
 4. Return the entire corrected layout in the exact same JSON schema.
 
 JSON SCHEMA:
@@ -354,19 +392,112 @@ Return a JSON object with a single root array called "elements":
   ]
 }
 
-CURRENT ELEMENTS ON CANVAS:
+CURRENT VECTOR ELEMENTS ON CANVAS:
 ${JSON.stringify(elements || [], null, 2)}
 
 CRITICAL: Return ONLY valid, minified JSON matching the schema above. Do NOT wrap it in markdown codeblocks (no \`\`\`json ... \`\`\`), do NOT write any introductory or conversational text. Return only the JSON string starting with { and ending with }.`;
 
+      const contents: any[] = [{ text: systemPrompt }];
+      if (imageBase64) {
+        contents.push({
+          inlineData: {
+            mimeType: "image/jpeg",
+            data: imageBase64
+          }
+        });
+      }
+
       const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: systemPrompt,
+        model: "gemini-3.5-flash",
+        contents,
+        config: {
+          responseMimeType: "application/json"
+        }
       });
 
       res.json({ text: response.text || "" });
     } catch (err: any) {
       console.error("Backend troubleshoot-page error:", err);
+      res.status(500).json({ error: err.message || "Troubleshooting failed" });
+    }
+  });
+
+  // 7. Troubleshoot & Fix Page Elements via direct .kpdf modification
+  app.post("/api/troubleshoot-kpdf", async (req, res) => {
+    try {
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        return res.status(400).json({ error: "Server GEMINI_API_KEY is not configured" });
+      }
+
+      const { kpdf, instruction, imageBase64 } = req.body;
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          }
+        }
+      });
+
+    const systemPrompt = `You are an expert AI educational content designer, layout organizer, and troubleshooting engine.
+You are given a full .kpdf JSON project representation of the current page containing vector educational and canvas objects (textboxes, lines, shapes, math/chemistry structures) rendered in a workspace.
+You are also given an optional visual snapshot of the page.
+The user wants you to modify, correct, rearrange, and fix this page based on their instruction.
+
+User Instruction: "${instruction || 'Fix and arrange the page elements, resolving any text wrapping and resizing issues.'}"
+
+CRITICAL GOALS & RULES:
+1. Parse and understand the .kpdf JSON. Focus on the objects in the canvas (located in the canvases dictionary).
+2. Carefully troubleshoot and correct:
+   - Spelling, vocabulary, and phrasing errors in Kurdish (Bahdini/Sorani Arabic script), Arabic, or English text inside textboxes. Double-check all Bahdini Kurdish letters ('ڤ', 'چ', 'پ', 'گ', 'ژ', 'ێ', 'ۆ', 'ڕ', 'ڵ'). Correct any misspelled words to pure, standard Bahdini Kurdish.
+   - Text wrapping / resizing issues:
+     - Check if any textbox has crowded text, overlaps, or is wrapping awkwardly.
+     - You MUST adjust the 'width' attribute of textboxes directly so the text wraps beautifully, with spacious, clean padding.
+     - Increase 'width' if lines are wrapping too much (e.g. single letters or short words wrapping to the next line).
+     - Ensure 'splitByGrapheme' is set to true for Kurdish textboxes to wrap correctly in Kurdish Arabic script.
+     - If textboxes were stretched/scaled (having scaleX !== 1 or scaleY !== 1), reset scaleX and scaleY to 1 and adjust 'width' and 'fontSize' proportionally instead to keep them clean.
+   - Symmetrically align and position elements. If things are messy, overlap, or misaligned, adjust their 'left' and 'top' coordinates in the canvas objects array so they look like a premium, professional publication.
+   - Arrange diagrams, geometric shapes, flowcharts, or branching structures cleanly with parallel coordinate alignments.
+   - PAGE FORMATTING SPECIFIC RULES:
+     * Spacing: Bring questions closer together vertically (reduce the gap / vertical distance between questions) by adjusting their 'top' coordinates.
+     * Options Layout: Align multiple-choice options (e.g., A, B, C, D or ئێک، دوو، سێ...) horizontally (ئاسۆیی) in a single row or side-by-side, instead of stacking them vertically, by setting their 'top' values to be similar/equal and adjusting their 'left' values.
+     * Correct Answer: Change the 'fill' (text color) of ONLY the correct answer textbox (or correct option) to RED (e.g., "#EF4444" or "red"), leaving all other options and elements unchanged.
+3. You are fully empowered to:
+   - Edit textbox contents ('text' field).
+   - Adjust widths, heights, fonts, fontSizes, colors, scaleX, scaleY, left, top.
+   - Add new elements (like textboxes, lines, rects, groups) to the canvas objects array.
+   - Delete unnecessary elements from the canvas objects array.
+4. Return the entire corrected .kpdf JSON structure in the exact same format (containing version, pages, and canvases fields).
+
+CRITICAL: Return ONLY valid, minified JSON matching the original .kpdf JSON format. Do NOT wrap it in markdown codeblocks (no \`\`\`json ... \`\`\`), do NOT write any introductory or conversational text. Return only the JSON string starting with { and ending with }.`;
+
+      const parts: any[] = [
+        { text: systemPrompt }, 
+        { text: `Original .kpdf Project JSON:\n${typeof kpdf === 'string' ? kpdf : JSON.stringify(kpdf)}` }
+      ];
+      if (imageBase64) {
+        parts.push({
+          inlineData: {
+            mimeType: "image/jpeg",
+            data: imageBase64
+          }
+        });
+      }
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3.5-flash",
+        contents: {
+          parts: parts
+        },
+        config: {
+          responseMimeType: "application/json"
+        }
+      });
+
+      res.json({ text: response.text || "" });
+    } catch (err: any) {
+      console.error("Backend troubleshoot-kpdf error:", err);
       res.status(500).json({ error: err.message || "Troubleshooting failed" });
     }
   });

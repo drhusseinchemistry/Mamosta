@@ -2,6 +2,514 @@ import React, { useEffect, useRef, useState } from 'react';
 import { EditorState, ToolType } from '../types';
 import { Icons } from './Icon';
 import { TextFormatter } from './TextFormatter';
+import { createMathSymbolGroup } from '../utils/mathSymbols';
+import { createGraphFabricGroup, GraphData, parseEquation } from '../utils/graphDrawer';
+
+interface CharStyle {
+  fill?: string;
+  fontWeight?: string;
+  fontStyle?: string;
+  underline?: boolean;
+  [key: string]: any;
+}
+
+interface FabricStyles {
+  [lineIndex: number]: {
+    [charIndex: number]: CharStyle;
+  };
+}
+
+const parseHtmlStyles = (input: string): { plainText: string; styles: FabricStyles } => {
+  let preprocessed = input || "";
+  // Preprocess Markdown bold/italic to HTML tags so the rest of the parsing works seamlessly
+  preprocessed = preprocessed.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
+  preprocessed = preprocessed.replace(/__(.*?)__/g, '<b>$1</b>');
+  preprocessed = preprocessed.replace(/\*(.*?)\*/g, '<i>$1</i>');
+  preprocessed = preprocessed.replace(/_(.*?)_/g, '<i>$1</i>');
+
+  let plainText = "";
+  const styles: FabricStyles = {};
+  
+  let currentLine = 0;
+  let currentChar = 0;
+  
+  const stateStack: CharStyle[] = [];
+  
+  const tagRegex = /(?:<span[^>]*style=["'][^"']*color:\s*(#[0-9a-fA-F]{3,8}|[a-zA-Z]+)[^"']*["'][^>]*>|<font[^>]*color=["']([^"']+)["'][^>]*>|\[color=([^\]]+)\]|<\/span>|<\/font>|\[\/color\]|<b>|\[b\]|<\/b>|\[\/b\]|<i>|\[i\]|<\/i>|\[\/i\]|<u>|\[u\]|<\/u>|\[\/u\]|<[^>]+>|\[[^\]]+\])/gi;
+  
+  let lastIdx = 0;
+  let match;
+  
+  while ((match = tagRegex.exec(preprocessed)) !== null) {
+    const matchIdx = match.index;
+    const matchStr = match[0];
+    
+    const prevText = preprocessed.substring(lastIdx, matchIdx);
+    for (let i = 0; i < prevText.length; i++) {
+      const char = prevText[i];
+      plainText += char;
+      
+      if (char === '\n') {
+        currentLine++;
+        currentChar = 0;
+      } else {
+        const mergedStyle: CharStyle = {};
+        stateStack.forEach(s => {
+          Object.assign(mergedStyle, s);
+        });
+        
+        if (Object.keys(mergedStyle).length > 0) {
+          if (!styles[currentLine]) {
+            styles[currentLine] = {};
+          }
+          styles[currentLine][currentChar] = mergedStyle;
+        }
+        currentChar++;
+      }
+    }
+    
+    const lowerMatch = matchStr.toLowerCase();
+    
+    if (match[1]) {
+      stateStack.push({ fill: match[1] });
+    } else if (match[2]) {
+      stateStack.push({ fill: match[2] });
+    } else if (match[3]) {
+      stateStack.push({ fill: match[3] });
+    } else if (lowerMatch === '<b>' || lowerMatch === '[b]') {
+      stateStack.push({ fontWeight: 'bold' });
+    } else if (lowerMatch === '<i>' || lowerMatch === '[i]') {
+      stateStack.push({ fontStyle: 'italic' });
+    } else if (lowerMatch === '<u>' || lowerMatch === '[u]') {
+      stateStack.push({ underline: true });
+    } else if (
+      lowerMatch === '</span>' || 
+      lowerMatch === '</font>' || 
+      lowerMatch === '[/color]' ||
+      lowerMatch === '</b>' || 
+      lowerMatch === '[/b]' || 
+      lowerMatch === '</i>' || 
+      lowerMatch === '[/i]' || 
+      lowerMatch === '</u>' || 
+      lowerMatch === '[/u]'
+    ) {
+      let targetProp: keyof CharStyle | null = null;
+      if (lowerMatch === '</span>' || lowerMatch === '</font>' || lowerMatch === '[/color]') {
+        targetProp = 'fill';
+      } else if (lowerMatch === '</b>' || lowerMatch === '[/b]') {
+        targetProp = 'fontWeight';
+      } else if (lowerMatch === '</i>' || lowerMatch === '[/i]') {
+        targetProp = 'fontStyle';
+      } else if (lowerMatch === '</u>' || lowerMatch === '[/u]') {
+        targetProp = 'underline';
+      }
+      
+      if (targetProp) {
+        for (let i = stateStack.length - 1; i >= 0; i--) {
+          if (stateStack[i][targetProp] !== undefined) {
+            stateStack.splice(i, 1);
+            break;
+          }
+        }
+      }
+    }
+    
+    lastIdx = tagRegex.lastIndex;
+  }
+  
+  const remainingText = preprocessed.substring(lastIdx);
+  for (let i = 0; i < remainingText.length; i++) {
+    const char = remainingText[i];
+    plainText += char;
+    
+    if (char === '\n') {
+      currentLine++;
+      currentChar = 0;
+    } else {
+      const mergedStyle: CharStyle = {};
+      stateStack.forEach(s => {
+        Object.assign(mergedStyle, s);
+      });
+      
+      if (Object.keys(mergedStyle).length > 0) {
+        if (!styles[currentLine]) {
+          styles[currentLine] = {};
+        }
+        styles[currentLine][currentChar] = mergedStyle;
+      }
+      currentChar++;
+    }
+  }
+  
+  return { plainText, styles };
+};
+
+const getHtmlFromFabric = (textObj: any): string => {
+  if (!textObj) return '';
+  const text = textObj.text || '';
+  const styles = textObj.styles || {};
+  
+  const lines = text.split('\n');
+  let htmlResult = '';
+  
+  for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+    const lineText = lines[lineIdx];
+    const lineStyles = styles[lineIdx] || {};
+    
+    let lineHtml = '';
+    let currentStyleStr = '';
+    let currentChunk = '';
+    
+    const getStyleKey = (charIdx: number) => {
+      const s = lineStyles[charIdx] || {};
+      const fill = s.fill || textObj.fill || '';
+      const isBold = s.fontWeight === 'bold' || textObj.fontWeight === 'bold';
+      const isItalic = s.fontStyle === 'italic' || textObj.fontStyle === 'italic';
+      const isUnderline = !!s.underline || !!textObj.underline;
+      return JSON.stringify({ fill, isBold, isItalic, isUnderline });
+    };
+    
+    for (let charIdx = 0; charIdx < lineText.length; charIdx++) {
+      const char = lineText[charIdx];
+      const styleKey = getStyleKey(charIdx);
+      
+      if (charIdx === 0) {
+        currentStyleStr = styleKey;
+        currentChunk = char;
+      } else if (styleKey === currentStyleStr) {
+        currentChunk += char;
+      } else {
+        lineHtml += wrapChunkWithStyle(currentChunk, JSON.parse(currentStyleStr), textObj);
+        currentStyleStr = styleKey;
+        currentChunk = char;
+      }
+    }
+    
+    if (currentChunk) {
+      lineHtml += wrapChunkWithStyle(currentChunk, JSON.parse(currentStyleStr), textObj);
+    }
+    
+    htmlResult += (lineIdx > 0 ? '\n' : '') + lineHtml;
+  }
+  
+  return htmlResult;
+};
+
+const wrapChunkWithStyle = (chunk: string, style: any, textObj: any) => {
+  let result = chunk;
+  
+  const defaultFill = textObj.fill || '#1f2937';
+  const isDefaultFill = !style.fill || style.fill.toLowerCase() === defaultFill.toLowerCase();
+  
+  if (style.fill && !isDefaultFill) {
+    result = `<span style="color:${style.fill}">${result}</span>`;
+  }
+  
+  if (style.isUnderline) {
+    result = `<u>${result}</u>`;
+  }
+  
+  if (style.isItalic) {
+    result = `<i>${result}</i>`;
+  }
+  
+  if (style.isBold) {
+    result = `<b>${result}</b>`;
+  }
+  
+  return result;
+};
+
+const convertLatexToFabricElements = (
+  rawText: string,
+  startLeft: number,
+  startTop: number,
+  textColor: string,
+  canvas: any,
+  onModified?: () => void
+) => {
+  if (!canvas || typeof window === 'undefined' || !window.fabric) return;
+  const fabric = window.fabric;
+
+  const toSuperscript = (str: string): string => {
+    const map: Record<string, string> = {
+      '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹',
+      '+': '⁺', '-': '⁻', '=': '⁼', '(': '⁽', ')': '⁾', 'n': 'ⁿ', 'i': 'ⁱ', 'x': 'ˣ', 'y': 'ʸ', 'a': 'ᵃ', 'b': 'ᵇ', 'c': 'ᶜ'
+    };
+    return str.split('').map(c => map[c] || c).join('');
+  };
+
+  const toSubscript = (str: string): string => {
+    const map: Record<string, string> = {
+      '0': '₀', '1': '₁', '2': '₂', '3': '₃', '4': '₄', '5': '₅', '6': '₆', '7': '₇', '8': '₈', '9': '₉',
+      '+': '₊', '-': '₋', '=': '₌', '(': '₍', ')': '₎', 'n': 'ₙ', 'x': 'ₓ', 'y': 'ᵧ', 'a': 'ₐ', 'e': 'ₑ', 'o': 'ₒ'
+    };
+    return str.split('').map(c => map[c] || c).join('');
+  };
+
+  const isRtlText = (text: string): boolean => {
+    const rtlRegex = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
+    return rtlRegex.test(text);
+  };
+
+  const parseLineToParts = (lineText: string): any[] => {
+    const parts: any[] = [];
+    let remaining = lineText.trim();
+    
+    // Normalize enclosing $$ or $
+    remaining = remaining.replace(/^\$\$\s*/, '').replace(/\s*\$\$/, '');
+    remaining = remaining.replace(/^\$\s*/, '').replace(/\s*\$/, '');
+    
+    while (remaining.length > 0) {
+      // 1. Check for fraction: \frac{A}{B}
+      const fracMatch = remaining.match(/^\\frac\s*\{((?:[^{}]|\{[^{}]*\})*)\}\s*\{((?:[^{}]|\{[^{}]*\})*)\}/);
+      if (fracMatch) {
+        parts.push({
+          type: 'fraction',
+          numerator: fracMatch[1],
+          denominator: fracMatch[2]
+        });
+        remaining = remaining.substring(fracMatch[0].length).trim();
+        continue;
+      }
+      
+      // 2. Check for summation: \sum_{bottom}^{top}
+      const sumMatch1 = remaining.match(/^\\sum\_\{((?:[^{}]|\{[^{}]*\})*)\}\^\{((?:[^{}]|\{[^{}]*\})*)\}/);
+      if (sumMatch1) {
+        parts.push({
+          type: 'sigma_sum',
+          bottomText: sumMatch1[1],
+          topText: sumMatch1[2]
+        });
+        remaining = remaining.substring(sumMatch1[0].length).trim();
+        continue;
+      }
+      const sumMatch2 = remaining.match(/^\\sum\^\{((?:[^{}]|\{[^{}]*\})*)\}\_\{((?:[^{}]|\{[^{}]*\})*)\}/);
+      if (sumMatch2) {
+        parts.push({
+          type: 'sigma_sum',
+          bottomText: sumMatch2[2],
+          topText: sumMatch2[1]
+        });
+        remaining = remaining.substring(sumMatch2[0].length).trim();
+        continue;
+      }
+      if (remaining.startsWith('\\sum')) {
+        parts.push({
+          type: 'sigma_sum',
+          bottomText: 'i=1',
+          topText: 'n'
+        });
+        remaining = remaining.substring(4).trim();
+        continue;
+      }
+
+      // 3. Check for limits: \lim_{bottom}
+      const limMatch = remaining.match(/^\\lim\_\{((?:[^{}]|\{[^{}]*\})*)\}/);
+      if (limMatch) {
+        parts.push({
+          type: 'limit',
+          bottomText: limMatch[1],
+          topText: ' '
+        });
+        remaining = remaining.substring(limMatch[0].length).trim();
+        continue;
+      }
+      if (remaining.startsWith('\\lim')) {
+        parts.push({
+          type: 'limit',
+          bottomText: 'x→∞',
+          topText: ' '
+        });
+        remaining = remaining.substring(4).trim();
+        continue;
+      }
+
+      // 4. Check for integral: \int_{bottom}^{top}
+      const intMatch1 = remaining.match(/^\\int\_\{((?:[^{}]|\{[^{}]*\})*)\}\^\{((?:[^{}]|\{[^{}]*\})*)\}/);
+      if (intMatch1) {
+        parts.push({
+          type: 'definite_integral',
+          bottomText: intMatch1[1],
+          topText: intMatch1[2]
+        });
+        remaining = remaining.substring(intMatch1[0].length).trim();
+        continue;
+      }
+      const intMatch2 = remaining.match(/^\\int\^\{((?:[^{}]|\{[^{}]*\})*)\}\_\{((?:[^{}]|\{[^{}]*\})*)\}/);
+      if (intMatch2) {
+        parts.push({
+          type: 'definite_integral',
+          bottomText: intMatch2[2],
+          topText: intMatch2[1]
+        });
+        remaining = remaining.substring(intMatch2[0].length).trim();
+        continue;
+      }
+      if (remaining.startsWith('\\int')) {
+        parts.push({
+          type: 'definite_integral',
+          bottomText: 'a',
+          topText: 'b'
+        });
+        remaining = remaining.substring(4).trim();
+        continue;
+      }
+
+      // 5. Read text until next control block
+      const nextControlIdx = remaining.search(/\\frac|\\sum|\\lim|\\int/);
+      let textChunk = '';
+      if (nextControlIdx === -1) {
+        textChunk = remaining;
+        remaining = '';
+      } else {
+        textChunk = remaining.substring(0, nextControlIdx);
+        remaining = remaining.substring(nextControlIdx);
+      }
+      
+      if (textChunk) {
+        textChunk = textChunk.replace(/\\textbf\{([^}]+)\}/g, '<b>$1</b>');
+        textChunk = textChunk.replace(/\\textit\{([^}]+)\}/g, '<i>$1</i>');
+        textChunk = textChunk.replace(/\\underline\{([^}]+)\}/g, '<u>$1</u>');
+        
+        textChunk = textChunk.replace(/\\sqrt\{([^}]+)\}/g, '√$1');
+        textChunk = textChunk.replace(/\\sqrt\s*([a-zA-Z0-9]+)/g, '√$1');
+        textChunk = textChunk.replace(/\\times/g, '×');
+        textChunk = textChunk.replace(/\\div/g, '÷');
+        textChunk = textChunk.replace(/\\pm/g, '±');
+        textChunk = textChunk.replace(/\\mp/g, '∓');
+        textChunk = textChunk.replace(/\\ge(q)?/g, '≥');
+        textChunk = textChunk.replace(/\\le(q)?/g, '≤');
+        textChunk = textChunk.replace(/\\ne(q)?/g, '≠');
+        textChunk = textChunk.replace(/\\approx/g, '≈');
+        textChunk = textChunk.replace(/\\infty/g, '∞');
+        textChunk = textChunk.replace(/\\theta/g, 'θ');
+        textChunk = textChunk.replace(/\\pi/g, 'π');
+        textChunk = textChunk.replace(/\\alpha/g, 'α');
+        textChunk = textChunk.replace(/\\beta/g, 'β');
+        textChunk = textChunk.replace(/\\gamma/g, 'γ');
+        textChunk = textChunk.replace(/\\lambda/g, 'λ');
+        textChunk = textChunk.replace(/\\rho/g, 'ρ');
+        textChunk = textChunk.replace(/\\mu/g, 'μ');
+        textChunk = textChunk.replace(/\\delta/g, 'δ');
+        textChunk = textChunk.replace(/\\Delta/g, 'Δ');
+        textChunk = textChunk.replace(/\\sigma/g, 'σ');
+        textChunk = textChunk.replace(/\\Sigma/g, 'Σ');
+        textChunk = textChunk.replace(/\\omega/g, 'ω');
+        textChunk = textChunk.replace(/\\Omega/g, 'Ω');
+        textChunk = textChunk.replace(/\\phi/g, 'φ');
+        textChunk = textChunk.replace(/\\degree/g, '°');
+        textChunk = textChunk.replace(/\\rightarrow|\\to/g, '→');
+        textChunk = textChunk.replace(/\\leftarrow/g, '←');
+        textChunk = textChunk.replace(/\\leftrightarrow/g, '↔');
+        textChunk = textChunk.replace(/\\left\||\\right\|/g, '|');
+        textChunk = textChunk.replace(/\\left\s*([\[\(\{\|\\])/g, '$1');
+        textChunk = textChunk.replace(/\\right\s*([\]\)\}\|\\])/g, '$1');
+        textChunk = textChunk.replace(/\\quad/g, '    ');
+        textChunk = textChunk.replace(/\\qquad/g, '        ');
+
+        textChunk = textChunk.replace(/\^\{([^}]+)\}/g, (m, p) => toSuperscript(p));
+        textChunk = textChunk.replace(/\^([0-9xy\+\-n])/g, (m, p) => toSuperscript(p));
+
+        textChunk = textChunk.replace(/\_\{([^}]+)\}/g, (m, p) => toSubscript(p));
+        textChunk = textChunk.replace(/\_([0-9\+\-nxy])/g, (m, p) => toSubscript(p));
+
+        textChunk = textChunk.replace(/\$\$/g, '').replace(/\$/g, '');
+
+        parts.push({
+          type: 'text',
+          text: textChunk
+        });
+      }
+    }
+    return parts;
+  };
+
+  const lines = rawText.split('\n');
+  let currentTop = startTop;
+
+  lines.forEach((lineText) => {
+    if (!lineText.trim()) {
+      currentTop += 40;
+      return;
+    }
+
+    const parts = parseLineToParts(lineText);
+    if (parts.length === 0) return;
+
+    const lineIsRtl = parts.some((p) => p.type === 'text' && isRtlText(p.text));
+
+    // Calculate dimensions of each part for layout
+    const partWidths = parts.map((p) => {
+      const fSize = 20; // Default rendering size
+      if (p.type === 'text') {
+        return (p.text.length * fSize * 0.55) + 12;
+      } else if (p.type === 'fraction') {
+        const maxLen = Math.max((p.numerator || '').length, (p.denominator || '').length);
+        return (maxLen * 12) + 24;
+      } else {
+        return 50; // Math symbol default width
+      }
+    });
+
+    const totalWidth = partWidths.reduce((sum, w) => sum + w, 0);
+    let currentLeft = lineIsRtl ? startLeft + (totalWidth / 2) : startLeft - (totalWidth / 2);
+
+    parts.forEach((p, idx) => {
+      const pWidth = partWidths[idx];
+      const leftPos = lineIsRtl ? currentLeft - pWidth : currentLeft;
+
+      if (p.type === 'text') {
+        const { plainText, styles: parsedStyles } = parseHtmlStyles(p.text);
+        const textObj = new fabric.Textbox(plainText, {
+          left: leftPos,
+          top: currentTop,
+          width: pWidth + 50, // Give some extra padding for wrap prevention
+          fontSize: 20,
+          fill: textColor,
+          fontFamily: 'Noto Sans Arabic, Inter, sans-serif',
+          selectable: true,
+          originX: 'left',
+          originY: 'center',
+          textAlign: lineIsRtl ? 'right' : 'left',
+          splitByGrapheme: true,
+          styles: parsedStyles
+        });
+        textObj.rawHtmlText = p.text;
+        canvas.add(textObj);
+      } else {
+        const mathGroup = createMathSymbolGroup(
+          p.type,
+          leftPos + (pWidth / 2),
+          currentTop,
+          textColor,
+          {
+            numerator: p.numerator,
+            denominator: p.denominator,
+            topText: p.topText,
+            bottomText: p.bottomText
+          }
+        );
+        if (mathGroup) {
+          mathGroup.set({
+            originX: 'center',
+            originY: 'center',
+            left: leftPos + (pWidth / 2),
+            top: currentTop
+          });
+          canvas.add(mathGroup);
+        }
+      }
+
+      currentLeft = lineIsRtl ? currentLeft - pWidth : currentLeft + pWidth;
+    });
+
+    const hasFraction = parts.some((p) => p.type === 'fraction');
+    currentTop += hasFraction ? 65 : 45;
+  });
+
+  if (onModified) onModified();
+};
 
 export const createTableGroup = (
   rows: number,
@@ -195,6 +703,18 @@ const PageEditor: React.FC<PageEditorProps> = ({
   const [mergeEndRow, setMergeEndRow] = useState<number>(0);
   const [mergeEndCol, setMergeEndCol] = useState<number>(0);
 
+  const [isCodeEditorOpen, setIsCodeEditorOpen] = useState<boolean>(false);
+  const [codeEditorText, setCodeEditorText] = useState<string>('');
+  const [editingObject, setEditingObject] = useState<any>(null);
+
+  // Touch Selection Handles States and Refs
+  const [handleCoords, setHandleCoords] = useState<{
+    start: { x: number; y: number; bottomY: number; lineHeight: number } | null;
+    end: { x: number; y: number; bottomY: number; lineHeight: number } | null;
+  }>({ start: null, end: null });
+
+  const dragTypeRef = useRef<'start' | 'end' | null>(null);
+
   // States for Fraction Customization Panel
   const [fractionNumText, setFractionNumText] = useState('a');
   const [fractionDenText, setFractionDenText] = useState('b');
@@ -215,6 +735,29 @@ const PageEditor: React.FC<PageEditorProps> = ({
   const [mathFontSize, setMathFontSize] = useState(36);
   const [mathTopFontSize, setMathTopFontSize] = useState(12);
   const [mathBottomFontSize, setMathBottomFontSize] = useState(12);
+
+  // States for Mathematical Graphs Customization Panel
+  const [graphQuestionText, setGraphQuestionText] = useState('نەخشەیێ بیرکاری (Math Graph)');
+  const [graphXMin, setGraphXMin] = useState(-6);
+  const [graphXMax, setGraphXMax] = useState(6);
+  const [graphYMin, setGraphYMin] = useState(-6);
+  const [graphYMax, setGraphYMax] = useState(6);
+  const [graphXStep, setGraphXStep] = useState(1);
+  const [graphYStep, setGraphYStep] = useState(1);
+  const [graphType, setGraphType] = useState<'linear' | 'quadratic' | 'points'>('linear');
+  const [graphLinearM, setGraphLinearM] = useState(1);
+  const [graphLinearC, setGraphLinearC] = useState(0);
+  const [graphQuadA, setGraphQuadA] = useState(0.5);
+  const [graphQuadB, setGraphQuadB] = useState(0);
+  const [graphQuadC, setGraphQuadC] = useState(-2);
+  const [graphPointsText, setGraphPointsText] = useState('-3,-2; -1,2; 2,1; 4,5');
+  const [graphLineColor, setGraphLineColor] = useState('#06b6d4');
+  const [graphBgColor, setGraphBgColor] = useState('#0f172a');
+  const [graphShowGrid, setGraphShowGrid] = useState(true);
+  const [graphFreeFormEq, setGraphFreeFormEq] = useState('y = x');
+  const [graphLineThickness, setGraphLineThickness] = useState(3);
+  const [graphLineStyle, setGraphLineStyle] = useState<'solid' | 'dashed' | 'dotted'>('solid');
+  const [graphEquations, setGraphEquations] = useState<any[]>([]);
 
   const handleScrollActiveObjectToTop = () => {
     const canvas = fabricCanvasRef.current;
@@ -312,6 +855,52 @@ const PageEditor: React.FC<PageEditorProps> = ({
         setMathBottomFontSize(bottom.fontSize || 12);
       } else {
         setMathBottomText('');
+      }
+    } else if (activeTextObject.isGraphGroup) {
+      const g = activeTextObject.graphData;
+      if (g) {
+        setGraphQuestionText(g.questionText || '');
+        setGraphXMin(g.xMin !== undefined ? g.xMin : -6);
+        setGraphXMax(g.xMax !== undefined ? g.xMax : 6);
+        setGraphYMin(g.yMin !== undefined ? g.yMin : -6);
+        setGraphYMax(g.yMax !== undefined ? g.yMax : 6);
+        setGraphXStep(g.xStep !== undefined ? g.xStep : 1);
+        setGraphYStep(g.yStep !== undefined ? g.yStep : 1);
+        setGraphType(g.graphType || 'linear');
+        setGraphLinearM(g.linearEq?.m !== undefined ? g.linearEq.m : 1);
+        setGraphLinearC(g.linearEq?.c !== undefined ? g.linearEq.c : 0);
+        setGraphQuadA(g.quadEq?.a !== undefined ? g.quadEq.a : 0.5);
+        setGraphQuadB(g.quadEq?.b !== undefined ? g.quadEq.b : 0);
+        setGraphQuadC(g.quadEq?.c !== undefined ? g.quadEq.c : -2);
+        setGraphLineColor(g.lineColor || '#06b6d4');
+        setGraphBgColor(g.bgColor || '#0f172a');
+        setGraphShowGrid(g.showGrid !== undefined ? g.showGrid : true);
+        setGraphLineThickness(g.lineThickness !== undefined ? g.lineThickness : 3);
+        setGraphLineStyle(g.lineStyle || 'solid');
+        
+        const initialEqs = g.equations && g.equations.length > 0 
+          ? g.equations 
+          : [
+              {
+                id: 'eq-1',
+                freeFormEq: g.freeFormEq || (g.graphType === 'linear' ? 'y = 1x' : 'y = 0.5x² - 2'),
+                type: g.graphType === 'points' ? 'linear' : g.graphType,
+                linearEq: g.linearEq || { m: 1, c: 0 },
+                quadEq: g.quadEq || { a: 0.5, b: 0, c: -2 },
+                lineColor: g.lineColor || '#06b6d4',
+                lineThickness: g.lineThickness !== undefined ? g.lineThickness : 3,
+                lineStyle: g.lineStyle || 'solid'
+              }
+            ];
+        setGraphEquations(initialEqs);
+        
+        const ptsStr = (g.points || []).map((p: any) => `${p.x},${p.y}`).join('; ');
+        setGraphPointsText(ptsStr);
+
+        const freeFormString = g.freeFormEq || (g.graphType === 'linear' 
+          ? `y = ${g.linearEq?.m !== undefined ? g.linearEq.m : 1}x ${g.linearEq?.c !== undefined && g.linearEq.c >= 0 ? `+ ${g.linearEq.c}` : `- ${Math.abs(g.linearEq?.c || 0)}`}`
+          : `y = ${g.quadEq?.a !== undefined ? g.quadEq.a : 0.5}x² ${g.quadEq?.b !== undefined && g.quadEq.b >= 0 ? `+ ${g.quadEq.b}x` : `- ${Math.abs(g.quadEq?.b || 0)}x`} ${g.quadEq?.c !== undefined && g.quadEq.c >= 0 ? `+ ${g.quadEq.c}` : `- ${Math.abs(g.quadEq?.c || 0)}`}`);
+        setGraphFreeFormEq(freeFormString);
       }
     }
   }, [activeTextObject]);
@@ -570,6 +1159,117 @@ const PageEditor: React.FC<PageEditorProps> = ({
     }
   };
 
+  // Mathematical Graph live update helper
+  const handleUpdateGraphItem = (updates: Partial<GraphData>) => {
+    if (!fabricCanvasRef.current || !activeTextObject || !activeTextObject.isGraphGroup) return;
+
+    isUpdatingRef.current = true;
+    try {
+      const canvas = fabricCanvasRef.current;
+      const group = activeTextObject;
+      const currentData = group.graphData;
+      const mergedData = { ...currentData, ...updates };
+
+      if (updates.questionText !== undefined) setGraphQuestionText(updates.questionText);
+      if (updates.xMin !== undefined) setGraphXMin(updates.xMin);
+      if (updates.xMax !== undefined) setGraphXMax(updates.xMax);
+      if (updates.yMin !== undefined) setGraphYMin(updates.yMin);
+      if (updates.yMax !== undefined) setGraphYMax(updates.yMax);
+      if (updates.xStep !== undefined) setGraphXStep(updates.xStep);
+      if (updates.yStep !== undefined) setGraphYStep(updates.yStep);
+      if (updates.graphType !== undefined) setGraphType(updates.graphType);
+      if (updates.linearEq !== undefined) {
+        if (updates.linearEq.m !== undefined) setGraphLinearM(updates.linearEq.m);
+        if (updates.linearEq.c !== undefined) setGraphLinearC(updates.linearEq.c);
+      }
+      if (updates.quadEq !== undefined) {
+        if (updates.quadEq.a !== undefined) setGraphQuadA(updates.quadEq.a);
+        if (updates.quadEq.b !== undefined) setGraphQuadB(updates.quadEq.b);
+        if (updates.quadEq.c !== undefined) setGraphQuadC(updates.quadEq.c);
+      }
+      if (updates.points !== undefined) {
+        const ptsStr = updates.points.map((p: any) => `${p.x},${p.y}`).join('; ');
+        setGraphPointsText(ptsStr);
+      }
+      if (updates.lineColor !== undefined) setGraphLineColor(updates.lineColor);
+      if (updates.bgColor !== undefined) setGraphBgColor(updates.bgColor);
+      if (updates.showGrid !== undefined) setGraphShowGrid(updates.showGrid);
+      if (updates.freeFormEq !== undefined) setGraphFreeFormEq(updates.freeFormEq);
+      if (updates.lineThickness !== undefined) setGraphLineThickness(updates.lineThickness);
+      if (updates.lineStyle !== undefined) setGraphLineStyle(updates.lineStyle);
+      if (updates.equations !== undefined) setGraphEquations(updates.equations);
+
+      const left = group.left;
+      const topPos = group.top;
+      const angle = group.angle;
+      const scaleX = group.scaleX;
+      const scaleY = group.scaleY;
+
+      const newGroup = createGraphFabricGroup(left, topPos, mergedData);
+      if (newGroup) {
+        newGroup.set({
+          angle: angle,
+          scaleX: scaleX,
+          scaleY: scaleY
+        });
+
+        canvas.remove(group);
+        canvas.add(newGroup);
+        canvas.setActiveObject(newGroup);
+        canvas.renderAll();
+
+        setActiveTextObject(newGroup);
+        onModified();
+      }
+    } finally {
+      isUpdatingRef.current = false;
+    }
+  };
+
+  const handleAddEquation = () => {
+    const colors = ['#06b6d4', '#ec4899', '#3b82f6', '#10b981', '#f59e0b', '#ef4444'];
+    const nextColor = colors[graphEquations.length % colors.length];
+    const newEq = {
+      id: `eq-${Date.now()}`,
+      freeFormEq: 'y = 2x',
+      type: 'linear' as const,
+      linearEq: { m: 2, c: 0 },
+      quadEq: { a: 0.5, b: 0, c: -2 },
+      lineColor: nextColor,
+      lineThickness: 3,
+      lineStyle: 'solid' as const
+    };
+    const updated = [...graphEquations, newEq];
+    handleUpdateGraphItem({ equations: updated });
+  };
+
+  const handleRemoveEquation = (id: string) => {
+    if (graphEquations.length <= 1) return;
+    const updated = graphEquations.filter(e => e.id !== id);
+    handleUpdateGraphItem({ equations: updated });
+  };
+
+  const handleUpdateEquation = (id: string, fields: Partial<any>) => {
+    const updated = graphEquations.map(e => {
+      if (e.id === id) {
+        const merged = { ...e, ...fields };
+        if (fields.freeFormEq !== undefined) {
+          const parsed = parseEquation(fields.freeFormEq);
+          if (parsed.type === 'linear' && parsed.linearEq) {
+            merged.type = 'linear';
+            merged.linearEq = parsed.linearEq;
+          } else if (parsed.type === 'quadratic' && parsed.quadEq) {
+            merged.type = 'quadratic';
+            merged.quadEq = parsed.quadEq;
+          }
+        }
+        return merged;
+      }
+      return e;
+    });
+    handleUpdateGraphItem({ equations: updated });
+  };
+
   useEffect(() => {
     if (!activeTextObject || !fabricCanvasRef.current) {
       setFloatingPos(null);
@@ -694,9 +1394,14 @@ const PageEditor: React.FC<PageEditorProps> = ({
     const applyDirectionToText = (obj: any) => {
       if (obj.type === 'i-text' || obj.type === 'text' || obj.type === 'textbox') {
         obj.set({
+          direction: dir,
           textAlign: dir === 'rtl' ? 'right' : 'left',
           fontFamily: dir === 'rtl' ? 'Noto Sans Arabic, Inter, sans-serif' : 'Inter, sans-serif'
         });
+        if (obj.isEditing) {
+          obj.exitEditing();
+          obj.enterEditing();
+        }
         if (typeof obj.initDimensions === 'function') {
           obj.initDimensions();
         }
@@ -1134,6 +1839,11 @@ const PageEditor: React.FC<PageEditorProps> = ({
     onTextSelectionRef.current = onTextSelection;
   }, [onTextSelection]);
 
+  const editorStateRef = useRef(editorState);
+  useEffect(() => {
+    editorStateRef.current = editorState;
+  }, [editorState]);
+
   // Clean up selection when page becomes inactive
   useEffect(() => {
     if (!isActive && fabricCanvasRef.current) {
@@ -1202,6 +1912,7 @@ const PageEditor: React.FC<PageEditorProps> = ({
           obj.set({ strokeUniform: true });
         }
         if (obj.type === 'group') {
+          const isGraph = obj.isGraphGroup === true;
           obj.getObjects().forEach((child: any) => {
             if (child.type === 'i-text' || child.type === 'textbox') {
               child.editable = false;
@@ -1213,7 +1924,7 @@ const PageEditor: React.FC<PageEditorProps> = ({
               });
             }
             if (['rect', 'circle', 'ellipse', 'triangle', 'polygon', 'polyline', 'line', 'path'].includes(child.type)) {
-              child.set({ strokeUniform: true });
+              child.set({ strokeUniform: !isGraph });
             }
           });
         }
@@ -1397,6 +2108,7 @@ const PageEditor: React.FC<PageEditorProps> = ({
                 splitByGrapheme: true,
                 minWidth: 10
               });
+              newItem.rawHtmlText = item.rawHtmlText || item.text;
               canvas.add(newItem);
               addedItems.push(newItem);
               if (item === closestText) {
@@ -1439,6 +2151,30 @@ const PageEditor: React.FC<PageEditorProps> = ({
     // Handle fraction line dynamic stretching as text is typed
     canvas.on('text:changed', (opt: any) => {
       const activeObj = opt.target;
+
+      // Inline HTML/BBCode tag parsing and stripping on-the-fly during editing
+      if (activeObj && (activeObj.type === 'textbox' || activeObj.type === 'i-text') && !activeObj.isEditingCode) {
+        const text = activeObj.text || '';
+        if (/<span|<font|\[color|<b>|\[b\]|<i>|\[i\]|<u>|\[u\]|<\/span>|<\/font>|\[\/color\]|<\/b>|\[\/b\]|<\/i>|\[\/i\]|<\/u>|\[\/u\]/gi.test(text)) {
+          const { plainText, styles: parsedStyles } = parseHtmlStyles(text);
+          const cursorStart = activeObj.selectionStart;
+          const cursorEnd = activeObj.selectionEnd;
+
+          activeObj.set({
+            text: plainText,
+            styles: parsedStyles
+          });
+
+          const newLen = plainText.length;
+          activeObj.set({
+            selectionStart: Math.min(cursorStart, newLen),
+            selectionEnd: Math.min(cursorEnd, newLen)
+          });
+
+          canvas.renderAll();
+        }
+      }
+
       if (activeObj && activeObj.fractionId) {
         const fractionId = activeObj.fractionId;
         const allObjects = canvas.getObjects();
@@ -1503,8 +2239,10 @@ const PageEditor: React.FC<PageEditorProps> = ({
     canvas.on('text:editing:exited', () => {
       if (isUpdatingRef.current) return;
       setIsEditingMode(false);
+      canvas.selection = editorStateRef.current.activeTool === 'select';
     });
     canvas.on('text:editing:entered', () => {
+      canvas.selection = false;
       const activeObj = canvas.getActiveObject();
       if (activeObj && (activeObj.type === 'i-text' || activeObj.type === 'text' || activeObj.type === 'textbox')) {
         setActiveTextObject(activeObj);
@@ -1552,9 +2290,24 @@ const PageEditor: React.FC<PageEditorProps> = ({
       }
     });
     canvas.on('text:editing:exited', (opt: any) => {
+      canvas.selection = editorStateRef.current.activeTool === 'select';
       const activeObj = opt.target;
       if (activeObj) {
         activeObj.editable = false;
+        if (activeObj.isEditingCode) {
+          const raw = activeObj.text || '';
+          activeObj.rawHtmlText = raw;
+          const { plainText, styles: parsedStyles } = parseHtmlStyles(raw);
+          activeObj.set({
+            text: plainText,
+            styles: parsedStyles
+          });
+          activeObj.isEditingCode = false;
+          canvas.renderAll();
+        } else {
+          // If edited normally, synchronize rawHtmlText with plain text as fallback
+          activeObj.rawHtmlText = activeObj.text || '';
+        }
       }
       if (activeObj && activeObj.fractionId) {
         const fractionId = activeObj.fractionId;
@@ -1666,7 +2419,7 @@ const PageEditor: React.FC<PageEditorProps> = ({
     
     // Mode Configuration
     canvas.isDrawingMode = activeTool === 'pen' || activeTool === 'highlighter';
-    canvas.selection = activeTool === 'select';
+    canvas.selection = activeTool === 'select' && !isEditingMode;
     
     // Discard selection and update selectability of objects
     if (activeTool === 'hand') {
@@ -1721,6 +2474,7 @@ const PageEditor: React.FC<PageEditorProps> = ({
                     splitByGrapheme: true,
                     minWidth: 10
                 });
+                text.rawHtmlText = 'بنڤیسە';
                 canvas.add(text);
                 canvas.setActiveObject(text);
                 text.enterEditing();
@@ -1822,7 +2576,222 @@ const PageEditor: React.FC<PageEditorProps> = ({
         canvas.off('mouse:up', onMouseUp);
     };
 
-  }, [editorState, pageNumber]);
+  }, [editorState, pageNumber, isEditingMode]);
+
+  const getSelectionCoords = (index: number) => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas || !activeTextObject) return null;
+    try {
+      const textLen = activeTextObject.text ? activeTextObject.text.length : 0;
+      const safeIndex = Math.max(0, Math.min(index, textLen));
+      
+      const coords = activeTextObject._getCursorCoords(safeIndex);
+      if (!coords) return null;
+
+      const vpt = canvas.viewportTransform || [1, 0, 0, 1, 0, 0];
+      const x = coords.left * vpt[0] + vpt[4];
+      const y = coords.top * vpt[3] + vpt[5];
+
+      const lineH = activeTextObject.cursorHeight || (activeTextObject.fontSize * (activeTextObject.lineHeight || 1.15));
+      const scaledLineH = lineH * activeTextObject.scaleY * vpt[3];
+
+      return {
+        x,
+        y,
+        bottomY: y + scaledLineH,
+        lineHeight: scaledLineH
+      };
+    } catch (err) {
+      console.error("Error calculating selection coords:", err);
+      return null;
+    }
+  };
+
+  const handleTextSelectionDragStart = (e: React.MouseEvent | React.TouchEvent, type: 'start' | 'end') => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragTypeRef.current = type;
+
+    const onDragMove = (moveEvent: MouseEvent | TouchEvent) => {
+      const canvas = fabricCanvasRef.current;
+      if (!canvas || !activeTextObject || !dragTypeRef.current) return;
+
+      const upperCanvas = canvas.upperCanvasEl;
+      if (!upperCanvas) return;
+
+      const clientX = 'touches' in moveEvent ? moveEvent.touches[0].clientX : moveEvent.clientX;
+      const clientY = 'touches' in moveEvent ? moveEvent.touches[0].clientY : moveEvent.clientY;
+
+      const fakeEvent = {
+        clientX,
+        clientY,
+        type: 'mousemove',
+        target: upperCanvas,
+        preventDefault: () => {},
+        stopPropagation: () => {},
+      };
+
+      if (typeof activeTextObject.getSelectionStartFromPointer === 'function') {
+        const index = activeTextObject.getSelectionStartFromPointer(fakeEvent);
+        if (typeof index === 'number' && index >= 0) {
+          const type = dragTypeRef.current;
+          let newStart = activeTextObject.selectionStart;
+          let newEnd = activeTextObject.selectionEnd;
+
+          if (type === 'start') {
+            newStart = Math.min(index, activeTextObject.selectionEnd);
+          } else {
+            newEnd = Math.max(index, activeTextObject.selectionStart);
+          }
+
+          activeTextObject.set({
+            selectionStart: newStart,
+            selectionEnd: newEnd
+          });
+          activeTextObject.fire('selection:changed');
+          canvas.renderAll();
+        }
+      }
+    };
+
+    const onDragEnd = () => {
+      dragTypeRef.current = null;
+      window.removeEventListener('mousemove', onDragMove);
+      window.removeEventListener('mouseup', onDragEnd);
+      window.removeEventListener('touchmove', onDragMove);
+      window.removeEventListener('touchend', onDragEnd);
+    };
+
+    window.addEventListener('mousemove', onDragMove, { passive: false });
+    window.addEventListener('mouseup', onDragEnd);
+    window.addEventListener('touchmove', onDragMove, { passive: false });
+    window.addEventListener('touchend', onDragEnd);
+  };
+
+  useEffect(() => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas || !activeTextObject || !isEditingMode || !activeTextObject.isEditing) {
+      setHandleCoords({ start: null, end: null });
+      return;
+    }
+
+    const updateHandles = () => {
+      const start = getSelectionCoords(activeTextObject.selectionStart);
+      const end = getSelectionCoords(activeTextObject.selectionEnd);
+      setHandleCoords({ start, end });
+    };
+
+    updateHandles();
+
+    activeTextObject.on('selection:changed', updateHandles);
+    activeTextObject.on('changed', updateHandles);
+    canvas.on('text:changed', updateHandles);
+    canvas.on('mouse:move', updateHandles);
+    canvas.on('after:render', updateHandles);
+
+    return () => {
+      activeTextObject.off('selection:changed', updateHandles);
+      activeTextObject.off('changed', updateHandles);
+      canvas.off('text:changed', updateHandles);
+      canvas.off('mouse:move', updateHandles);
+      canvas.off('after:render', updateHandles);
+    };
+  }, [activeTextObject, isEditingMode, zoomFactor]);
+
+  const touchStartIndexRef = useRef<number>(-1);
+
+  useEffect(() => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+
+    const upperCanvas = canvas.upperCanvasEl;
+    if (!upperCanvas) return;
+
+    if (!isEditingMode || !activeTextObject || !activeTextObject.isEditing) {
+      return;
+    }
+
+    const handleTouchStart = (e: TouchEvent) => {
+      if (e.touches.length > 0) {
+        // Prevent default to stop scrolling/zooming and dragging the textbox
+        e.preventDefault();
+        e.stopPropagation();
+
+        const touch = e.touches[0];
+        const fakeEvent = {
+          clientX: touch.clientX,
+          clientY: touch.clientY,
+          type: 'mousedown',
+          target: upperCanvas,
+          preventDefault: () => {},
+          stopPropagation: () => {},
+          touches: e.touches,
+          targetTouches: e.targetTouches,
+          changedTouches: e.changedTouches
+        };
+
+        if (typeof activeTextObject.getSelectionStartFromPointer === 'function') {
+          const index = activeTextObject.getSelectionStartFromPointer(fakeEvent);
+          if (typeof index === 'number' && index >= 0) {
+            touchStartIndexRef.current = index;
+            activeTextObject.set({
+              selectionStart: index,
+              selectionEnd: index
+            });
+            activeTextObject.fire('selection:changed');
+            canvas.renderAll();
+          }
+        }
+      }
+    };
+
+    const handleTouchMove = (e: TouchEvent) => {
+      if (e.touches.length > 0 && touchStartIndexRef.current !== -1) {
+        e.preventDefault();
+        e.stopPropagation();
+
+        const touch = e.touches[0];
+        const fakeEvent = {
+          clientX: touch.clientX,
+          clientY: touch.clientY,
+          type: 'mousemove',
+          target: upperCanvas,
+          preventDefault: () => {},
+          stopPropagation: () => {},
+          touches: e.touches,
+          targetTouches: e.targetTouches,
+          changedTouches: e.changedTouches
+        };
+
+        if (typeof activeTextObject.getSelectionStartFromPointer === 'function') {
+          const index = activeTextObject.getSelectionStartFromPointer(fakeEvent);
+          if (typeof index === 'number' && index >= 0) {
+            const start = touchStartIndexRef.current;
+            activeTextObject.set({
+              selectionStart: Math.min(start, index),
+              selectionEnd: Math.max(start, index)
+            });
+            activeTextObject.fire('selection:changed');
+            canvas.renderAll();
+          }
+        }
+      }
+    };
+
+    const handleTouchEnd = () => {
+      touchStartIndexRef.current = -1;
+    };
+
+    upperCanvas.addEventListener('touchstart', handleTouchStart, { passive: false });
+    upperCanvas.addEventListener('touchmove', handleTouchMove, { passive: false });
+    upperCanvas.addEventListener('touchend', handleTouchEnd, { passive: true });
+
+    return () => {
+      upperCanvas.removeEventListener('touchstart', handleTouchStart);
+      upperCanvas.removeEventListener('touchmove', handleTouchMove);
+      upperCanvas.removeEventListener('touchend', handleTouchEnd);
+    };
+  }, [isEditingMode, activeTextObject, pageNumber]);
 
   const showVoiceButton = isActive && (!!activeTextObject || editorState.activeTool === 'text');
 
@@ -1890,6 +2859,41 @@ const PageEditor: React.FC<PageEditorProps> = ({
       }}
     >
       <canvas ref={canvasElRef} />
+      
+      {/* Visual Text Selection Handles for Mobile & Tablet Devices */}
+      {isActive && isEditingMode && activeTextObject && activeTextObject.isEditing && handleCoords.start && (
+        <div 
+          className="absolute z-50 cursor-pointer flex items-center justify-center select-none"
+          style={{
+            left: `${handleCoords.start.x - 22}px`,
+            top: `${handleCoords.start.bottomY}px`,
+            width: '44px',
+            height: '44px',
+            touchAction: 'none'
+          }}
+          onTouchStart={(e) => handleTextSelectionDragStart(e, 'start')}
+          onMouseDown={(e) => handleTextSelectionDragStart(e, 'start')}
+        >
+          <div className="w-4 h-4 bg-blue-500 rounded-full rounded-tr-none -rotate-45 shadow-lg shadow-blue-500/40 border border-white/20"></div>
+        </div>
+      )}
+
+      {isActive && isEditingMode && activeTextObject && activeTextObject.isEditing && handleCoords.end && (
+        <div 
+          className="absolute z-50 cursor-pointer flex items-center justify-center select-none"
+          style={{
+            left: `${handleCoords.end.x - 22}px`,
+            top: `${handleCoords.end.bottomY}px`,
+            width: '44px',
+            height: '44px',
+            touchAction: 'none'
+          }}
+          onTouchStart={(e) => handleTextSelectionDragStart(e, 'end')}
+          onMouseDown={(e) => handleTextSelectionDragStart(e, 'end')}
+        >
+          <div className="w-4 h-4 bg-blue-500 rounded-full rounded-tr-none -rotate-45 shadow-lg shadow-blue-500/40 border border-white/20"></div>
+        </div>
+      )}
       
       {/* Floating Action Button above Selected Object */}
       {isActive && floatingPos && (
@@ -1982,21 +2986,39 @@ const PageEditor: React.FC<PageEditorProps> = ({
 
           {/* Direct Edit / Keyboard Button */}
           {activeTextObject && (activeTextObject.type === 'i-text' || activeTextObject.type === 'text' || activeTextObject.type === 'textbox' || activeTextObject.isType?.('i-text') || activeTextObject.isType?.('text') || activeTextObject.isType?.('textbox')) && (
-            <button
-              onClick={() => {
-                if (activeTextObject && typeof activeTextObject.enterEditing === 'function') {
-                  activeTextObject.editable = true;
-                  activeTextObject.enterEditing();
-                  activeTextObject.selectAll?.();
-                  if (fabricCanvasRef.current) fabricCanvasRef.current.renderAll();
-                }
-              }}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-emerald-800 bg-emerald-950/95 text-emerald-200 hover:bg-emerald-800 hover:text-white shadow-lg text-[10px] font-black transition-all duration-150 active:scale-95 whitespace-nowrap"
-              title="تەعدیلکرنا دەقی (Edit Text)"
-            >
-              <Icons.Edit size={12} className="text-emerald-400 animate-pulse" />
-              <span>دەستکاری (Edit)</span>
-            </button>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => {
+                  if (activeTextObject && typeof activeTextObject.enterEditing === 'function') {
+                    activeTextObject.editable = true;
+                    activeTextObject.enterEditing();
+                    activeTextObject.selectAll?.();
+                    if (fabricCanvasRef.current) fabricCanvasRef.current.renderAll();
+                  }
+                }}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-emerald-800 bg-emerald-950/95 text-emerald-200 hover:bg-emerald-800 hover:text-white shadow-lg text-[10px] font-black transition-all duration-150 active:scale-95 whitespace-nowrap"
+                title="تەعدیلکرنا دەقی (Edit Text)"
+              >
+                <Icons.Edit size={12} className="text-emerald-400 animate-pulse" />
+                <span>دەستکاری (Edit)</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  if (activeTextObject) {
+                    const raw = getHtmlFromFabric(activeTextObject) || activeTextObject.rawHtmlText || activeTextObject.text || '';
+                    setCodeEditorText(raw);
+                    setEditingObject(activeTextObject);
+                    setIsCodeEditorOpen(true);
+                  }
+                }}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-teal-800 bg-teal-950/95 text-teal-200 hover:bg-teal-800 hover:text-white shadow-lg text-[10px] font-black transition-all duration-150 active:scale-95 whitespace-nowrap"
+                title="دەستکاری کرنا کۆدی (Edit Code)"
+              >
+                <Icons.Code size={12} className="text-teal-400 animate-pulse" />
+                <span>دەستکاری کودا</span>
+              </button>
+            </div>
           )}
 
           {/* Edit Fraction Button */}
@@ -2055,8 +3077,29 @@ const PageEditor: React.FC<PageEditorProps> = ({
             </button>
           )}
 
+          {/* Edit Graph Button */}
+          {activeTextObject && activeTextObject.isGraphGroup === true && (
+            <button
+              onClick={() => {
+                setIsEditingMode(true);
+                setTimeout(() => {
+                  const qInput = document.getElementById('graph-question-input');
+                  if (qInput) {
+                    qInput.focus();
+                    (qInput as HTMLInputElement).select();
+                  }
+                }, 120);
+              }}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-violet-800 bg-violet-950/95 text-violet-200 hover:bg-violet-800 hover:text-white shadow-lg text-[10px] font-black transition-all duration-150 active:scale-95 whitespace-nowrap"
+              title="تەعدیلکرنا هێلکاریێ (Edit Graph)"
+            >
+              <Icons.Edit size={12} className="text-violet-400 animate-pulse" />
+              <span>دەستکاری هێڵکاریێ (Edit Graph)</span>
+            </button>
+          )}
+
           {/* Edit / Format Button for Shapes, Lines, Paths, Groups (opens sidebar formatter) */}
-          {activeTextObject && !(activeTextObject.type === 'i-text' || activeTextObject.type === 'text' || activeTextObject.type === 'textbox' || activeTextObject.isFractionGroup || activeTextObject.isMathSymbolGroup || activeTextObject.isTable) && (
+          {activeTextObject && !(activeTextObject.type === 'i-text' || activeTextObject.type === 'text' || activeTextObject.type === 'textbox' || activeTextObject.isFractionGroup || activeTextObject.isMathSymbolGroup || activeTextObject.isTable || activeTextObject.isGraphGroup) && (
             <button
               onClick={() => {
                 if (onOpenFormatter) onOpenFormatter();
@@ -2906,11 +3949,556 @@ const PageEditor: React.FC<PageEditorProps> = ({
           </div>
         </div>
       )}
-      
+
+      {/* Mathematical Graph Editor Panel */}
+      {isActive && activeTextObject && isEditingMode && activeTextObject.isGraphGroup === true && (
+        <div 
+          className="absolute top-4 right-4 z-50 bg-white border border-slate-200/80 rounded-2xl p-4 shadow-sm text-slate-800 w-80 animate-in fade-in slide-in-from-right-4 duration-300 max-h-[85%] overflow-y-auto flex flex-col gap-4 text-right"
+          dir="rtl"
+        >
+          {/* Header */}
+          <div className="flex justify-between items-center border-b border-slate-100 pb-2 flex-row-reverse">
+            <button 
+              onClick={() => {
+                if (fabricCanvasRef.current) {
+                  fabricCanvasRef.current.discardActiveObject();
+                  fabricCanvasRef.current.renderAll();
+                }
+                setActiveTextObject(null);
+                setIsEditingMode(false);
+              }}
+              className="text-slate-400 hover:text-slate-800 hover:bg-slate-50 p-1.5 rounded-full transition-all"
+            >
+              <Icons.X size={16} />
+            </button>
+            <div className="flex items-center gap-2 font-black text-sm text-violet-600">
+              <Icons.LineChart size={18} className="text-violet-600" />
+              <span>ڕێکخستنێن هێڵکاریێ (Math Graph)</span>
+            </div>
+          </div>
+
+          {/* Question Text */}
+          <div className="flex flex-col gap-1 text-right">
+            <span className="text-[11px] text-slate-400 font-bold">دەقێ پرسیارێ (Question Text)</span>
+            <input 
+              id="graph-question-input"
+              type="text"
+              value={graphQuestionText}
+              onFocus={handleScrollActiveObjectToTop}
+              onChange={(e) => handleUpdateGraphItem({ questionText: e.target.value })}
+              className="bg-slate-50 border border-slate-200 hover:border-slate-300 focus:border-violet-500 focus:outline-none text-slate-800 text-xs p-2 rounded-lg font-medium text-right w-full transition-colors"
+              placeholder="پرسیارێ ل ئێرە بنڤیسە..."
+            />
+          </div>
+
+          {/* Graph Type Selection */}
+          <div className="flex flex-col gap-1.5 text-right border-t border-slate-100 pt-2">
+            <span className="text-[11px] text-slate-400 font-bold">جۆرێ هێڵکاریێ (Graph Type)</span>
+            <div className="grid grid-cols-3 gap-1">
+              {[
+                { type: 'linear', label: 'هێڵی (Linear)', icon: 'y=mx+c' },
+                { type: 'quadratic', label: 'کەوانەیی (Quadratic)', icon: 'y=ax²+c' },
+                { type: 'points', label: 'خاڵان (Points)', icon: '• • •' }
+              ].map((g) => (
+                <button
+                  key={g.type}
+                  onClick={() => handleUpdateGraphItem({ graphType: g.type as any })}
+                  className={`py-1.5 px-1 rounded-lg text-[10px] font-bold border transition-all flex flex-col items-center justify-center gap-0.5
+                    ${graphType === g.type 
+                      ? 'bg-violet-600 border-violet-600 text-white shadow-none' 
+                      : 'bg-slate-50 border-slate-200 text-slate-500 hover:border-slate-300 hover:text-slate-800'}`}
+                >
+                  <span className="opacity-80 font-mono text-[9px]">{g.icon}</span>
+                  <span>{g.label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Dynamic Equation Controls */}
+          <div className="bg-slate-50 rounded-xl border border-slate-100 p-2.5 flex flex-col gap-3">
+            <span className="text-[10px] text-violet-600 font-black flex items-center gap-1">
+              <span>⚡</span>
+              <span>دەستکاریکردنا هاوکێشەیێ (Equation)</span>
+            </span>
+
+            {graphType !== 'points' && (
+              <div className="flex flex-col gap-3">
+                {/* Equation List */}
+                <div className="flex flex-col gap-2.5">
+                  {(graphEquations && graphEquations.length > 0 ? graphEquations : [
+                    {
+                      id: 'eq-1',
+                      freeFormEq: graphFreeFormEq,
+                      type: graphType,
+                      linearEq: { m: graphLinearM, c: graphLinearC },
+                      quadEq: { a: graphQuadA, b: graphQuadB, c: graphQuadC },
+                      lineColor: graphLineColor,
+                      lineThickness: graphLineThickness,
+                      lineStyle: graphLineStyle
+                    }
+                  ]).map((eq, index) => {
+                    const isLinear = eq.type === 'linear';
+                    return (
+                      <div 
+                        key={eq.id} 
+                        className="bg-white border border-slate-200 rounded-xl p-3 flex flex-col gap-2.5 text-right relative shadow-sm"
+                      >
+                        {/* Equation Row Header */}
+                        <div className="flex items-center justify-between flex-row-reverse border-b border-slate-100 pb-1.5">
+                          <span className="text-[10px] text-slate-500 font-bold">
+                            هاوکێشە {index + 1} ({isLinear ? 'هێڵی - Linear' : 'کەوانەیی - Quad'})
+                          </span>
+                          
+                          {graphEquations.length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveEquation(eq.id)}
+                              className="text-red-400 hover:text-red-600 hover:bg-red-50 p-1 rounded transition-all"
+                              title="Delete Equation"
+                            >
+                              <Icons.Trash size={12} />
+                            </button>
+                          )}
+                        </div>
+
+                        {/* Input for this specific equation */}
+                        <div className="flex flex-col gap-1 text-right">
+                          <span className="text-[9px] text-slate-400 font-bold">هاوکێشە (e.g. y = -x + 3)</span>
+                          <input 
+                            type="text"
+                            value={eq.freeFormEq}
+                            onChange={(e) => handleUpdateEquation(eq.id, { freeFormEq: e.target.value })}
+                            className="bg-slate-50 border border-slate-200 hover:border-slate-300 focus:border-violet-500 focus:outline-none text-slate-800 text-xs p-1.5 rounded-lg font-mono text-center w-full transition-colors"
+                            placeholder="y = x"
+                          />
+                        </div>
+
+                        {/* Equation Coefficient Info (Readonly preview for clarity) */}
+                        <div className="text-[9px] text-slate-500 font-mono text-center bg-slate-50/50 py-1 rounded border border-slate-100/50">
+                          {isLinear ? (
+                            <span>y = {eq.linearEq?.m ?? 1}x {((eq.linearEq?.c ?? 0) >= 0) ? `+ ${eq.linearEq?.c ?? 0}` : `- ${Math.abs(eq.linearEq?.c ?? 0)}`}</span>
+                          ) : (
+                            <span>y = {eq.quadEq?.a ?? 0.5}x² {((eq.quadEq?.b ?? 0) >= 0) ? `+ ${eq.quadEq?.b ?? 0}x` : `- ${Math.abs(eq.quadEq?.b ?? 0)}x`} {((eq.quadEq?.c ?? -2) >= 0) ? `+ ${eq.quadEq?.c ?? -2}` : `- ${Math.abs(eq.quadEq?.c ?? -2)}`}</span>
+                          )}
+                        </div>
+
+                        {/* Independent Style Controls */}
+                        <div className="grid grid-cols-2 gap-2 border-t border-slate-100 pt-2 text-right">
+                          {/* Line Style (Solid or Dashed) */}
+                          <div className="flex flex-col gap-1">
+                            <span className="text-[9px] text-slate-400 font-bold">شێوازێ هێڵێ</span>
+                            <div className="grid grid-cols-2 gap-0.5 bg-slate-100 p-0.5 rounded-md">
+                              {[
+                                { value: 'solid', label: 'Solid', spec: '━' },
+                                { value: 'dashed', label: 'Dashed', spec: '╌' }
+                              ].map((style) => (
+                                <button
+                                  key={style.value}
+                                  type="button"
+                                  onClick={() => handleUpdateEquation(eq.id, { lineStyle: style.value })}
+                                  className={`py-0.5 rounded text-[8px] font-bold transition-all flex flex-col items-center justify-center
+                                    ${eq.lineStyle === style.value 
+                                      ? 'bg-white text-violet-600 shadow-sm' 
+                                      : 'text-slate-500 hover:text-slate-800'}`}
+                                >
+                                  <span>{style.label}</span>
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+
+                          {/* Line Thickness Slider */}
+                          <div className="flex flex-col gap-1">
+                            <div className="flex justify-between items-center text-[8px] text-slate-500">
+                              <span className="font-mono bg-slate-100 px-1 rounded font-bold">{eq.lineThickness || 3}px</span>
+                              <span>ستووراتی</span>
+                            </div>
+                            <input 
+                              type="range"
+                              min="1"
+                              max="10"
+                              step="0.5"
+                              value={eq.lineThickness || 3}
+                              onChange={(e) => handleUpdateEquation(eq.id, { lineThickness: Number(e.target.value) })}
+                              className="w-full h-1 bg-slate-200 rounded appearance-none cursor-pointer accent-violet-600 focus:outline-none mt-1"
+                            />
+                          </div>
+                        </div>
+
+                        {/* Independent Color Picker */}
+                        <div className="flex items-center justify-between gap-1 flex-row-reverse border-t border-slate-100 pt-2 mt-1">
+                          <span className="text-[9px] text-slate-400 font-bold">ڕەنگێ هاوکێشەیێ</span>
+                          <div className="flex items-center gap-1">
+                            {['#06b6d4', '#ec4899', '#3b82f6', '#10b981', '#f59e0b', '#ef4444'].map((c) => (
+                              <button 
+                                key={c}
+                                type="button"
+                                onClick={() => handleUpdateEquation(eq.id, { lineColor: c })}
+                                className={`w-3.5 h-3.5 rounded-full border hover:scale-110 transition-all ${eq.lineColor === c ? 'border-slate-800 scale-105' : 'border-slate-200'}`}
+                                style={{ backgroundColor: c }}
+                              />
+                            ))}
+                            <input 
+                              type="color"
+                              value={eq.lineColor || '#06b6d4'}
+                              onChange={(e) => handleUpdateEquation(eq.id, { lineColor: e.target.value })}
+                              className="w-3.5 h-3.5 rounded-full cursor-pointer bg-transparent border-0 focus:outline-none p-0"
+                            />
+                          </div>
+                        </div>
+
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Add Equation Button */}
+                <button
+                  type="button"
+                  onClick={handleAddEquation}
+                  className="w-full py-2 border-2 border-dashed border-violet-200 hover:border-violet-400 hover:bg-violet-50 text-violet-600 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all"
+                >
+                  <Icons.Plus size={12} />
+                  <span>زێدەکرنا هاوکێشەیێ (+ Add Equation)</span>
+                </button>
+              </div>
+            )}
+
+            {graphType === 'points' && (
+              <div className="flex flex-col gap-1.5">
+                <span className="text-[9px] text-slate-400">خاڵێن کۆردینات (جوداکردن ب ";" - x,y):</span>
+                <textarea 
+                  value={graphPointsText}
+                  onChange={(e) => {
+                    const text = e.target.value;
+                    setGraphPointsText(text);
+                    const parsed = text.split(';')
+                      .map(p => {
+                        const parts = p.split(',');
+                        if (parts.length === 2) {
+                          const xVal = Number(parts[0].trim());
+                          const yVal = Number(parts[1].trim());
+                          if (!isNaN(xVal) && !isNaN(yVal)) {
+                            return { x: xVal, y: yVal };
+                          }
+                        }
+                        return null;
+                      })
+                      .filter((p): p is { x: number; y: number } => p !== null);
+                    
+                    handleUpdateGraphItem({ points: parsed });
+                  }}
+                  className="bg-white border border-slate-200 rounded p-1.5 text-center text-xs text-slate-800 h-16 focus:outline-none focus:border-violet-500 font-mono"
+                  placeholder="-3,-2; -1,2; 2,1; 4,5"
+                />
+              </div>
+            )}
+          </div>
+
+          {/* Grid, Steps, Limits Controls */}
+          <div className="bg-slate-50 rounded-xl border border-slate-100 p-2.5 flex flex-col gap-2.5">
+            <span className="text-[10px] text-violet-600 font-black flex items-center gap-1">
+              <span>📏</span>
+              <span>تەوەرە و تۆڕ (Axes & Grid)</span>
+            </span>
+
+            {/* Grid Visibility and Custom Range */}
+            <div className="flex items-center justify-between text-[10px] text-slate-600 pb-1.5 border-b border-slate-200/50">
+              <label className="flex items-center gap-1.5 cursor-pointer">
+                <input 
+                  type="checkbox"
+                  checked={graphShowGrid}
+                  onChange={(e) => handleUpdateGraphItem({ showGrid: e.target.checked })}
+                  className="rounded bg-white border-slate-300 accent-violet-600"
+                />
+                <span>شیشەکردنا تۆڕێ (Show Grid)</span>
+              </label>
+            </div>
+
+            {/* Custom Limits */}
+            <div className="grid grid-cols-2 gap-2">
+              <div className="flex flex-col gap-1">
+                <span className="text-[9px] text-slate-400">مەودای تەوەری X (X Max/Min)</span>
+                <div className="flex gap-1">
+                  <input 
+                    type="number"
+                    value={graphXMin}
+                    onChange={(e) => handleUpdateGraphItem({ xMin: Number(e.target.value) || -6 })}
+                    className="bg-white border border-slate-200 rounded p-0.5 text-center text-[10px] text-slate-800 w-1/2 font-mono focus:outline-none focus:border-violet-500"
+                    title="X Min"
+                  />
+                  <input 
+                    type="number"
+                    value={graphXMax}
+                    onChange={(e) => handleUpdateGraphItem({ xMax: Number(e.target.value) || 6 })}
+                    className="bg-white border border-slate-200 rounded p-0.5 text-center text-[10px] text-slate-800 w-1/2 font-mono focus:outline-none focus:border-violet-500"
+                    title="X Max"
+                  />
+                </div>
+              </div>
+              <div className="flex flex-col gap-1">
+                <span className="text-[9px] text-slate-400">مەودای تەوەری Y (Y Max/Min)</span>
+                <div className="flex gap-1">
+                  <input 
+                    type="number"
+                    value={graphYMin}
+                    onChange={(e) => handleUpdateGraphItem({ yMin: Number(e.target.value) || -6 })}
+                    className="bg-white border border-slate-200 rounded p-0.5 text-center text-[10px] text-slate-800 w-1/2 font-mono focus:outline-none focus:border-violet-500"
+                    title="Y Min"
+                  />
+                  <input 
+                    type="number"
+                    value={graphYMax}
+                    onChange={(e) => handleUpdateGraphItem({ yMax: Number(e.target.value) || 6 })}
+                    className="bg-white border border-slate-200 rounded p-0.5 text-center text-[10px] text-slate-800 w-1/2 font-mono focus:outline-none focus:border-violet-500"
+                    title="Y Max"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <div className="flex flex-col gap-1">
+                <span className="text-[9px] text-slate-400">هەنگاوێ X (X Step)</span>
+                <input 
+                  type="number"
+                  min="0.5"
+                  step="0.5"
+                  value={graphXStep}
+                  onChange={(e) => handleUpdateGraphItem({ xStep: Number(e.target.value) || 1 })}
+                  className="bg-white border border-slate-200 rounded p-0.5 text-center text-[10px] text-slate-800 font-mono focus:outline-none focus:border-violet-500"
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <span className="text-[9px] text-slate-400">هەنگاوێ Y (Y Step)</span>
+                <input 
+                  type="number"
+                  min="0.5"
+                  step="0.5"
+                  value={graphYStep}
+                  onChange={(e) => handleUpdateGraphItem({ yStep: Number(e.target.value) || 1 })}
+                  className="bg-white border border-slate-200 rounded p-0.5 text-center text-[10px] text-slate-800 font-mono focus:outline-none focus:border-violet-500"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Color Customizers */}
+          <div className="bg-slate-50 rounded-xl border border-slate-100 p-2.5 flex flex-col gap-2 pt-2 text-right">
+            <span className="text-[10px] text-violet-600 font-black flex items-center gap-1">
+              <span>🎨</span>
+              <span>ڕەنگ و پاشبنەما (Aesthetics)</span>
+            </span>
+
+            {/* Line Color picker */}
+            <div className="flex items-center justify-between gap-2 border-b border-slate-200/50 pb-1.5 flex-row-reverse">
+              <span className="text-[10px] text-slate-600">ڕەنگێ هێڵێ (Line Color)</span>
+              <div className="flex items-center gap-1">
+                {['#06b6d4', '#ec4899', '#3b82f6', '#10b981', '#f59e0b', '#ef4444'].map((c) => (
+                  <button 
+                    key={c}
+                    onClick={() => handleUpdateGraphItem({ lineColor: c })}
+                    className={`w-3.5 h-3.5 rounded-full border hover:scale-110 transition-all ${graphLineColor === c ? 'border-slate-800' : 'border-slate-200'}`}
+                    style={{ backgroundColor: c }}
+                  />
+                ))}
+                <input 
+                  type="color"
+                  value={graphLineColor}
+                  onChange={(e) => handleUpdateGraphItem({ lineColor: e.target.value })}
+                  className="w-3.5 h-3.5 rounded-full cursor-pointer bg-transparent border-0 focus:outline-none p-0"
+                />
+              </div>
+            </div>
+
+            {/* Background Color picker */}
+            <div className="flex items-center justify-between gap-2 flex-row-reverse">
+              <span className="text-[10px] text-slate-600 font-bold">پاشبنەما (Bg Color)</span>
+              <div className="flex items-center gap-1">
+                {[
+                  { value: '#0f172a', label: 'تۆخ' },
+                  { value: '#ffffff', label: 'سپی' },
+                  { value: 'transparent', label: 'بێ ڕەنگ' }
+                ].map((bg) => (
+                  <button 
+                    key={bg.value}
+                    onClick={() => {
+                      const isDark = bg.value === '#0f172a';
+                      const textC = isDark ? '#f8fafc' : '#334155';
+                      const axisC = isDark ? '#475569' : '#cbd5e1';
+                      const gridC = isDark ? '#1e293b' : '#f1f5f9';
+                      handleUpdateGraphItem({ 
+                        bgColor: bg.value,
+                        textColor: textC,
+                        axisColor: axisC,
+                        gridColor: gridC
+                      });
+                    }}
+                    className={`text-[9px] font-black px-1.5 py-0.5 rounded border transition-all
+                      ${graphBgColor === bg.value 
+                        ? 'bg-violet-600 border-violet-600 text-white' 
+                        : 'bg-white border-slate-200 text-slate-500 hover:text-slate-800 hover:border-slate-300'}`}
+                  >
+                    {bg.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Advanced Line Customization Controls */}
+          <div className="bg-slate-50 rounded-xl border border-slate-100 p-2.5 flex flex-col gap-3 text-right">
+            <span className="text-[10px] text-violet-600 font-black flex items-center gap-1">
+              <span>✏️</span>
+              <span>شێوازێ هێڵێ (Line Style)</span>
+            </span>
+
+            {/* Thickness Control */}
+            <div className="flex flex-col gap-1">
+              <div className="flex justify-between items-center text-[10px] text-slate-600">
+                <span className="font-mono bg-slate-200/50 px-1.5 py-0.5 rounded text-[9px] font-bold">
+                  {graphLineThickness}px
+                </span>
+                <span>ستووراتییا هێڵێ (Line Thickness)</span>
+              </div>
+              <input 
+                type="range"
+                min="1"
+                max="10"
+                step="0.5"
+                value={graphLineThickness}
+                onChange={(e) => handleUpdateGraphItem({ lineThickness: Number(e.target.value) })}
+                className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-violet-600 focus:outline-none"
+              />
+            </div>
+
+            {/* Line Type Selector */}
+            <div className="flex flex-col gap-1">
+              <span className="text-[9px] text-slate-400 font-bold font-sans">جۆرێ هێڵێ (Line Style)</span>
+              <div className="grid grid-cols-3 gap-1">
+                {[
+                  { value: 'solid', label: 'پڕ (Solid)', spec: '━' },
+                  { value: 'dashed', label: 'شەقشەقی', spec: '╌' },
+                  { value: 'dotted', label: 'خاڵخاڵی', spec: '• •' }
+                ].map((s) => (
+                  <button 
+                    key={s.value}
+                    type="button"
+                    onClick={() => handleUpdateGraphItem({ lineStyle: s.value as any })}
+                    className={`py-1 rounded-md text-[10px] font-bold border transition-all flex flex-col items-center justify-center gap-0.5
+                      ${graphLineStyle === s.value 
+                        ? 'bg-violet-600 border-violet-600 text-white' 
+                        : 'bg-white border-slate-200 text-slate-500 hover:border-slate-300 hover:text-slate-800'}`}
+                  >
+                    <span className="font-mono text-[9px] opacity-85 leading-none">{s.spec}</span>
+                    <span className="text-[9px]">{s.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Page Number Indicator */}
       <div className="absolute -left-10 top-0 text-gray-400 font-bold text-lg hidden xl:block">
         {pageNumber}
       </div>
+
+      {/* Code Editor Modal (Overlay/Dialog) */}
+      {isCodeEditorOpen && (
+        <div className="fixed inset-0 z-[150] flex items-center justify-center bg-zinc-950/85 backdrop-blur-md p-4 animate-in fade-in duration-200">
+          <div 
+            className="bg-slate-900 border border-white/10 rounded-2xl p-6 shadow-2xl text-white w-full max-w-2xl flex flex-col gap-4 animate-in zoom-in-95 duration-200 text-right"
+            dir="rtl"
+          >
+            {/* Header */}
+            <div className="flex justify-between items-center border-b border-white/10 pb-3 flex-row-reverse">
+              <button 
+                onClick={() => setIsCodeEditorOpen(false)}
+                className="text-gray-400 hover:text-white hover:bg-white/10 p-1.5 rounded-full transition-all"
+              >
+                <Icons.X size={18} />
+              </button>
+              <div className="flex items-center gap-2 font-black text-base text-teal-400">
+                <Icons.Code size={20} className="animate-pulse text-teal-400" />
+                <span>دەستکاری کرنا کۆدی (Edit Text Code)</span>
+              </div>
+            </div>
+
+            {/* Description */}
+            <p className="text-xs text-gray-400 font-bold leading-relaxed">
+              ل ڤێرە دشێی دەستکاری د کۆد و شێوازێ نڤیسینێ دا بکەی. دشێی کۆدێن ڕەنگان <code className="text-teal-300 font-mono">{"<span style=\"color:#ڕەنگ\">"}</code> یان کۆدێن ئەستوورکرنێ <code className="text-teal-300 font-mono">{"<b>"}</code> بەکاربینی.
+            </p>
+
+            {/* Textarea */}
+            <textarea
+              value={codeEditorText}
+              onChange={(e) => setCodeEditorText(e.target.value)}
+              className="w-full h-64 bg-zinc-950 border border-white/10 rounded-xl p-4 font-mono text-xs text-gray-200 focus:outline-none focus:border-teal-500/50 focus:ring-1 focus:ring-teal-500/50 resize-none leading-relaxed text-left"
+              style={{ direction: 'ltr' }}
+              placeholder="کۆدی نڤیسینێ ل ڤێرە بنڤیسە..."
+            />
+
+            {/* Actions */}
+            <div className="flex gap-3 justify-end mt-2 flex-wrap">
+              <button
+                onClick={() => {
+                  if (editingObject && fabricCanvasRef.current) {
+                    const canvas = fabricCanvasRef.current;
+                    const left = editingObject.left || 150;
+                    const top = editingObject.top || 150;
+                    const color = editingObject.fill || '#1f2937';
+                    
+                    // Convert LaTeX to rich components
+                    convertLatexToFabricElements(codeEditorText, left, top, color, canvas, onModified);
+                    
+                    // Remove the old raw text object
+                    canvas.remove(editingObject);
+                    canvas.renderAll();
+                    setIsCodeEditorOpen(false);
+                  }
+                }}
+                className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-violet-600 hover:bg-violet-500 active:scale-95 text-white font-black text-xs transition-all shadow-lg cursor-pointer"
+                title="کۆدێن بیرکاری و کەرتا وەربگێڕە بۆ سەر لاپەڕێ (Convert Math & Fractions)"
+              >
+                <Icons.Calculator size={16} />
+                <span>چارەسەرکرنا بیرکاریێ (Render LaTeX)</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  if (editingObject) {
+                    const parsed = parseHtmlStyles(codeEditorText);
+                    editingObject.set({
+                      text: parsed.plainText,
+                      styles: parsed.styles
+                    });
+                    editingObject.rawHtmlText = codeEditorText;
+                    if (fabricCanvasRef.current) {
+                      fabricCanvasRef.current.renderAll();
+                    }
+                    if (onModified) onModified();
+                  }
+                  setIsCodeEditorOpen(false);
+                }}
+                className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-teal-600 hover:bg-teal-500 active:scale-95 text-white font-black text-xs transition-all shadow-lg cursor-pointer"
+              >
+                <Icons.Check size={16} />
+                <span>پەسەندکرن (Apply Standard)</span>
+              </button>
+              
+              <button
+                onClick={() => setIsCodeEditorOpen(false)}
+                className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 active:scale-95 text-gray-300 hover:text-white font-black text-xs transition-all border border-white/5 cursor-pointer"
+              >
+                <span>پاشگەزبوون (Cancel)</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
