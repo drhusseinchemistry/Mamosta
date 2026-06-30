@@ -2038,6 +2038,41 @@ const App: React.FC = () => {
     }
   };
 
+  const showAuthErrorAlert = (err: any, customContext: string = "چوونەژوورەوە") => {
+    console.error("Auth error:", err);
+    const code = err?.code || '';
+    const message = err?.message || '';
+
+    if (code === 'auth/operation-not-allowed' || message.includes('operation-not-allowed')) {
+      alert(`⚠️ خەتایا چوونەژوورێ (Operation Not Allowed)!
+
+ئەڤ خەتایە ژ لایێ Firebase ڤە دهێت چونکی شێوازێ چوونەژوورێ (Email/Password یان Google) د ناو پرۆژەیێ تە دا ل سەر کۆنسۆلا Firebase نەهاتیە چالاککرن (Enabled).
+
+بۆ چارەسەرکرنا ڤێ خەتایێ، ئەڤان گاڤان ئەنجام بدە:
+١. بچۆ ناڤ مالپەڕێ کۆنسۆلا فایەربەیس: https://console.firebase.google.com
+٢. پرۆژەیێ خۆ یێ فایەربەیس (Firebase Project) هەلبژێرە.
+٣. د بەشێ چەپێ دا کلیک ل سەر "Authentication" بکە.
+٤. بچۆ بەشێ "Sign-in method" (د سەر سکرینێ دا).
+٥. ل بەشێ "Sign-in providers"، کلیک ل سەر "Email/Password" بکە و "Enable" بکە، و پاشان کلیک ل سەر "Save" بکە.
+٦. هەر ل وێرێ، ئەگەر دڤێت ب رێیا جیمێل بچییە ژوور، کلیک ل سەر "Google" بکە و "Enable" بکە و Save بکە.
+
+ئەڤە خەتایەکا کۆدێ تەیێ مالپەڕی نینە، بەلکۆ پێویستە تو ڤان تەنزیماتان د فایەربەیسا خۆ دا کارا بکەی.`);
+    } else if (code === 'auth/unauthorized-domain' || message.includes('unauthorized-domain') || message.includes('auth/domain-not-allowed')) {
+      alert(`⚠️ خەتایا ناونیشانێ مالپەڕی (Unauthorized Domain)!
+
+ئەڤ خەتایە دهێت چونکی ناونیشانێ مالپەڕێ تە (pdfhusseinn.netlify.app یان یێ دی) نەهاتیە تۆمارکرن د لیستا ڕێپێدراوان دا ل سەر Firebase.
+
+بۆ چارەسەرکرنا ڤێ خەتایێ:
+١. بچۆ کۆنسۆلا فایەربەیس: https://console.firebase.google.com
+٢. پرۆژەیێ خۆ هەلبژێرە و بچۆ بەشێ "Authentication".
+٣. کلیک ل سەر تابلۆیا "Settings" بکە (د تەنیشت Sign-in method).
+٤. ل لیستا لایێ چەپ، بچۆ سەر "Authorized domains".
+٥. کلیک ل سەر "Add domain" بکە و ناونیشانێ مالپەڕێ خۆ یێ نەتلیفای یان گیتهەب بنڤیسە (بۆ نموونە: pdfhusseinn.netlify.app) و پاشان Add بکە.`);
+    } else {
+      alert(`خەتا د ${customContext} دا ڕوویدا:\n${message || err}`);
+    }
+  };
+
   const handleStartNewProject = () => {
     // Clear fabric canvas instances from canvasesRef
     Object.values(canvasesRef.current).forEach(canvas => {
@@ -2674,13 +2709,21 @@ const App: React.FC = () => {
                       </div>
 
                       {/* Deployment / Host Warning for Firebase Authorized Domains */}
-                      <div className="p-3 bg-amber-950/30 border border-amber-800/40 rounded-xl text-right space-y-1.5" dir="rtl">
-                        <p className="text-[11px] font-bold text-amber-400 flex items-center gap-1 justify-start">
-                          <span>⚠️ تێبینی گرنگ بۆ بڵاوکردنەوە (GitHub & Netlify)</span>
+                      <div className="p-4 bg-amber-950/40 border border-amber-800/50 rounded-xl text-right space-y-3" dir="rtl">
+                        <p className="text-xs font-black text-amber-400 flex items-center gap-1.5 justify-start">
+                          <span>⚠️ ڕێبەرێ ڕێکخستنا فایەربەیس (ڕێگەپێدان ل سەر Netlify / GitHub)</span>
                         </p>
-                        <p className="text-[10px] text-amber-200/90 leading-relaxed">
-                          ئەگەر دروستکردنی ئەکاونت یان چوونەژوورەوە کار نەکات لەسەر Netlify یان GitHub، پێویستە ناونیشانی مالپەڕی خۆت (بۆ نموونە <code className="bg-amber-900/40 px-1 py-0.5 rounded text-white font-mono text-[9px]">pdfhusseinn.netlify.app</code>) زیاد بکەیت لە لیستی <strong>Authorized Domains</strong> لە بەشی Authentication &gt; Settings لە ناو کۆنسۆلی Firebase Console. بەبێ ئەمە Firebase ڕێگە بە چوونەژوورەوە نادات.
-                        </p>
+                        <div className="space-y-2 text-[11px] text-amber-200/90 leading-relaxed">
+                          <p className="font-extrabold text-amber-300">١. کاراکرنا شێوازێن چوونەژوورێ (Sign-in Method):</p>
+                          <p className="mr-2">
+                            بۆ چارەسەرکرنا خەتایا <code className="bg-amber-950 px-1 py-0.5 rounded font-mono text-[10px] text-red-400">auth/operation-not-allowed</code>، پێویستە بچیە کۆنسۆلا Firebase بەشی <span className="font-bold underline">Authentication</span> پاشان لاپەڕا <span className="font-bold underline">Sign-in method</span> و هەردوو شێوازێن <strong>Email/Password</strong> و <strong>Google</strong> بکەیە چالاک (Enable) و Save بکەی.
+                          </p>
+                          <div className="h-[1px] bg-amber-800/30 my-1"></div>
+                          <p className="font-extrabold text-amber-300">٢. زێدەکرنا دۆمەینێ مالپەڕی (Authorized Domains):</p>
+                          <p className="mr-2">
+                            بۆ ئەوی ڕێگە ب چوونەژوورێ بهێتە دان ل سەر نەتلیفای، پێویستە ناونیشانی مالپەڕی خۆت (بۆ نموونە <code className="bg-amber-950 px-1 py-0.5 rounded font-mono text-[10px] text-white">pdfhusseinn.netlify.app</code>) زیاد بکەیت لە لیستی <span className="font-bold">Authorized Domains</span> ل بەشی <span className="font-bold">Authentication &gt; Settings</span> ل ناو کۆنسۆلا Firebase Console.
+                          </p>
+                        </div>
                       </div>
 
                       {/* Google Sign In */}
@@ -2690,7 +2733,7 @@ const App: React.FC = () => {
                           try {
                             await signInWithGoogle();
                           } catch (err: any) {
-                            alert("چوونەژوورەوە شکست هێنا: " + err.message);
+                            showAuthErrorAlert(err, "چوونەژوورەوە ب ڕێیا گوگل");
                           }
                         }}
                         className="w-full flex items-center justify-center gap-2 px-5 py-3 bg-white hover:bg-zinc-200 text-black font-bold text-xs rounded-xl transition-all shadow-xl"
@@ -2764,7 +2807,7 @@ const App: React.FC = () => {
                                 alert("بخێر بێی پڕۆژێن تە باربوون! 🎉");
                               }
                             } catch (err: any) {
-                              alert("خەتا د چوونەژوورەوە دا ڕوویدا: " + err.message);
+                              showAuthErrorAlert(err, authIsSignUp ? "تۆمارکرنا ئەکاونتی" : "چوونەژوورەوە ب ئیمەیڵ");
                             } finally {
                               setEditorState(prev => ({ ...prev, isProcessing: false, statusMessage: null }));
                             }
@@ -2801,7 +2844,7 @@ const App: React.FC = () => {
                             setEditorState(prev => ({ ...prev, isProcessing: true, statusMessage: 'چوونەژوور وەک مێوان...' }));
                             await loginAsGuest(name || "مێوانێ بێناڤ");
                           } catch (err: any) {
-                            alert("خەتا ڕوویدا: " + err.message);
+                            showAuthErrorAlert(err, "چوونەژوور وەک مێوان");
                           } finally {
                             setEditorState(prev => ({ ...prev, isProcessing: false, statusMessage: null }));
                           }

@@ -22,7 +22,20 @@ import {
   where, 
   serverTimestamp 
 } from 'firebase/firestore';
-import firebaseConfig from '../firebase-applet-config.json';
+import appletConfig from '../firebase-applet-config.json';
+
+// Resolve configuration: Support custom VITE_ environment variables (useful for Netlify, GitHub Pages, etc.)
+const metaEnv = (import.meta as any).env || {};
+const firebaseConfig = {
+  apiKey: metaEnv.VITE_FIREBASE_API_KEY || appletConfig.apiKey,
+  authDomain: metaEnv.VITE_FIREBASE_AUTH_DOMAIN || appletConfig.authDomain,
+  projectId: metaEnv.VITE_FIREBASE_PROJECT_ID || appletConfig.projectId,
+  storageBucket: metaEnv.VITE_FIREBASE_STORAGE_BUCKET || appletConfig.storageBucket,
+  messagingSenderId: metaEnv.VITE_FIREBASE_MESSAGING_SENDER_ID || appletConfig.messagingSenderId,
+  appId: metaEnv.VITE_FIREBASE_APP_ID || appletConfig.appId,
+  measurementId: metaEnv.VITE_FIREBASE_MEASUREMENT_ID || appletConfig.measurementId,
+  firestoreDatabaseId: metaEnv.VITE_FIREBASE_DATABASE_ID || (appletConfig as any).firestoreDatabaseId || undefined,
+};
 
 // Initialize Firebase App
 const app = initializeApp(firebaseConfig);
@@ -32,7 +45,11 @@ export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 
 // Initialize Firestore (with databaseId specified)
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+// Standard Firestore uses '(default)' database which should not be passed to getFirestore
+const dbId = firebaseConfig.firestoreDatabaseId;
+export const db = (dbId && dbId !== "(default)" && dbId !== "") 
+  ? getFirestore(app, dbId) 
+  : getFirestore(app);
 
 // Validate Connection on Boot as mandated by guidelines
 export async function testConnection() {
