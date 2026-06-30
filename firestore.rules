@@ -41,7 +41,7 @@ service cloud.firestore {
         && data.title.size() > 0
         && data.title.size() <= 200
         && data.userId is string
-        && data.userId == request.auth.uid
+        && (data.userId == request.auth.uid || isAdmin())
         && data.pages is list
         && data.pages.size() <= 100
         && data.canvases is map
@@ -62,10 +62,10 @@ service cloud.firestore {
 
     // /projects/{projectId}
     match /projects/{projectId} {
-      allow get: if isSignedIn() && (isOwner(existing().userId) || existing().get('isPublished', false) == true) && isValidId(projectId);
+      allow get: if isSignedIn() && (isOwner(existing().userId) || existing().get('isPublished', false) == true || isAdmin()) && isValidId(projectId);
       
-      // Query enforcement: client must filter by userId or template isPublished
-      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || resource.data.get('isPublished', false) == true);
+      // Query enforcement: client must filter by userId, template isPublished, or requestPublish (for admin)
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || resource.data.get('isPublished', false) == true || isAdmin());
       
       allow create: if isSignedIn() 
         && isValidId(projectId)
@@ -76,18 +76,20 @@ service cloud.firestore {
       allow update: if isSignedIn()
         && isValidId(projectId)
         && isValidProject(incoming())
-        && isOwner(existing().userId)
+        && (isAdmin() || isOwner(existing().userId))
         // Ensure immutable creator and creation time
         && incoming().userId == existing().userId
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
-        // Action: Rename or edit content or publish
+        // Action: Rename or edit content or request/set publish
         && (
-          incoming().diff(existing()).affectedKeys().hasOnly(['title', 'pages', 'canvases', 'updatedAt', 'isPublished'])
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'title', 'pages', 'canvases', 'updatedAt', 'isPublished', 'requestPublish', 'authorName', 'authorEmail'
+          ])
         );
         
       allow delete: if isSignedIn() 
-        && isOwner(existing().userId)
+        && (isOwner(existing().userId) || isAdmin())
         && isValidId(projectId);
     }
 

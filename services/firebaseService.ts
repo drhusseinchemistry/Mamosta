@@ -1,5 +1,14 @@
 import { initializeApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
+import { 
+  getAuth, 
+  GoogleAuthProvider, 
+  signInWithPopup, 
+  signOut,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signInAnonymously,
+  updateProfile
+} from 'firebase/auth';
 import { 
   getFirestore, 
   doc, 
@@ -101,6 +110,38 @@ export async function signInWithGoogle() {
   }
 }
 
+export async function loginWithEmail(email: string, pass: string) {
+  try {
+    const res = await signInWithEmailAndPassword(auth, email, pass);
+    return res.user;
+  } catch (error) {
+    console.error("Email login failed:", error);
+    throw error;
+  }
+}
+
+export async function registerWithEmail(email: string, pass: string, displayName: string) {
+  try {
+    const res = await createUserWithEmailAndPassword(auth, email, pass);
+    await updateProfile(res.user, { displayName });
+    return res.user;
+  } catch (error) {
+    console.error("Email registration failed:", error);
+    throw error;
+  }
+}
+
+export async function loginAsGuest(displayName: string = "مێوان / Guest") {
+  try {
+    const res = await signInAnonymously(auth);
+    await updateProfile(res.user, { displayName });
+    return res.user;
+  } catch (error) {
+    console.error("Anonymous login failed:", error);
+    throw error;
+  }
+}
+
 export async function logOut() {
   try {
     await signOut(auth);
@@ -120,6 +161,9 @@ export interface CloudProject {
   pages: any[];
   canvases: Record<string, any>;
   isPublished?: boolean;
+  requestPublish?: boolean;
+  authorName?: string;
+  authorEmail?: string;
 }
 
 // 1. Save or Update Project in Cloud
@@ -153,7 +197,9 @@ export async function saveProjectToCloud(
         image: p.image || '' // string url / representation
       })),
       canvases: canvases,
-      updatedAt: serverTimestamp()
+      updatedAt: serverTimestamp(),
+      authorName: user.displayName || 'کۆدکار',
+      authorEmail: user.email || 'guest@kpdf.local'
     };
 
     if (isPublished !== undefined) {
@@ -207,7 +253,10 @@ export async function getCloudProjects(): Promise<CloudProject[]> {
         updatedAt: data.updatedAt,
         pages: data.pages || [],
         canvases: data.canvases || {},
-        isPublished: data.isPublished || false
+        isPublished: data.isPublished || false,
+        requestPublish: data.requestPublish || false,
+        authorName: data.authorName || 'بەکارهێنەرێک',
+        authorEmail: data.authorEmail || ''
       });
     });
 
@@ -239,7 +288,10 @@ export async function getCloudTemplates(): Promise<CloudProject[]> {
         updatedAt: data.updatedAt,
         pages: data.pages || [],
         canvases: data.canvases || {},
-        isPublished: true
+        isPublished: true,
+        requestPublish: data.requestPublish || false,
+        authorName: data.authorName || 'بەکارهێنەرێک',
+        authorEmail: data.authorEmail || ''
       });
     });
 
@@ -262,5 +314,65 @@ export async function deleteProjectFromCloud(projectId: string): Promise<void> {
     await deleteDoc(projectRef);
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, projectPath);
+  }
+}
+
+// 4. Request Public Publish
+export async function requestProjectPublish(projectId: string, authorName: string, authorEmail: string): Promise<void> {
+  try {
+    const projectRef = doc(db, 'projects', projectId);
+    await setDoc(projectRef, {
+      requestPublish: true,
+      authorName: authorName,
+      authorEmail: authorEmail,
+      updatedAt: serverTimestamp()
+    }, { merge: true });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `projects/${projectId}`);
+  }
+}
+
+// 5. Approve Project Publish (Admin only)
+export async function approveProjectPublish(projectId: string, isApproved: boolean): Promise<void> {
+  try {
+    const projectRef = doc(db, 'projects', projectId);
+    await setDoc(projectRef, {
+      isPublished: isApproved,
+      requestPublish: false,
+      updatedAt: serverTimestamp()
+    }, { merge: true });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `projects/${projectId}`);
+  }
+}
+
+// 6. Get Pending Projects for Admin Approval
+export async function getPendingProjects(): Promise<CloudProject[]> {
+  try {
+    const pendingQuery = query(
+      collection(db, 'projects'),
+      where('requestPublish', '==', true)
+    );
+    const snapshot = await getDocs(pendingQuery);
+    const projects: CloudProject[] = [];
+    snapshot.forEach(docSnap => {
+      const data = docSnap.data();
+      projects.push({
+        id: docSnap.id,
+        title: data.title,
+        userId: data.userId,
+        createdAt: data.createdAt,
+        updatedAt: data.updatedAt,
+        pages: data.pages || [],
+        canvases: data.canvases || {},
+        isPublished: data.isPublished || false,
+        requestPublish: true,
+        authorName: data.authorName || 'بەکارهێنەرێک',
+        authorEmail: data.authorEmail || ''
+      });
+    });
+    return projects;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, 'projects');
   }
 }

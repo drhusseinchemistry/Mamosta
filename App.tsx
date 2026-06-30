@@ -9,7 +9,22 @@ import { EditorState, PageData, ToolType } from './types';
 import { initializePDFJS, loadPDFDocument, renderPDFPageToDataURL } from './services/pdfService';
 import { transcribeAudio, performOCR, validateApiKey, lastValidationError, generateMathFromImage, checkServerConfig, troubleshootPage, troubleshootKpdfPage } from './services/geminiService';
 import { Icons } from './components/Icon';
-import { auth, signInWithGoogle, logOut, saveProjectToCloud, getCloudProjects, getCloudTemplates, deleteProjectFromCloud, CloudProject } from './services/firebaseService';
+import { 
+  auth, 
+  signInWithGoogle, 
+  loginWithEmail, 
+  registerWithEmail, 
+  loginAsGuest, 
+  logOut, 
+  saveProjectToCloud, 
+  getCloudProjects, 
+  getCloudTemplates, 
+  deleteProjectFromCloud, 
+  requestProjectPublish, 
+  approveProjectPublish, 
+  getPendingProjects, 
+  CloudProject 
+} from './services/firebaseService';
 import { onAuthStateChanged, User } from 'firebase/auth';
 
 interface CharStyle {
@@ -240,6 +255,17 @@ const App: React.FC = () => {
   const [cloudProjects, setCloudProjects] = useState<CloudProject[]>([]);
   const [cloudTemplates, setCloudTemplates] = useState<CloudProject[]>([]);
   const [saveTitle, setSaveTitle] = useState<string>('');
+
+  // Projects Modal and Custom Authentication State
+  const [showProjectsModal, setShowProjectsModal] = useState<boolean>(false);
+  const [projectsTab, setProjectsTab] = useState<'my' | 'public' | 'pending'>('my');
+  const [pendingProjects, setPendingProjects] = useState<CloudProject[]>([]);
+  const [cloudError, setCloudError] = useState<string | null>(null);
+  const [isCloudLoading, setIsCloudLoading] = useState<boolean>(false);
+  const [authEmail, setAuthEmail] = useState<string>('');
+  const [authPassword, setAuthPassword] = useState<string>('');
+  const [authDisplayName, setAuthDisplayName] = useState<string>('');
+  const [authIsSignUp, setAuthIsSignUp] = useState<boolean>(false);
 
   // Auto-Save Refs
   const autoSaveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -475,26 +501,48 @@ const App: React.FC = () => {
     }
   }, [pages, activePage, appTheme, iconSize, listMarkerStyle]);
 
+  const loadAllCloudData = async (currentUser?: User | null) => {
+    const activeUser = currentUser !== undefined ? currentUser : user;
+    if (!activeUser) {
+      setCloudProjects([]);
+      setCloudTemplates([]);
+      setPendingProjects([]);
+      return;
+    }
+
+    setIsCloudLoading(true);
+    setCloudError(null);
+    try {
+      // 1. Fetch own cloud projects
+      const projs = await getCloudProjects();
+      setCloudProjects(projs || []);
+
+      // 2. Fetch approved public templates
+      const temps = await getCloudTemplates();
+      setCloudTemplates(temps || []);
+
+      // 3. If admin, fetch pending requests
+      if (activeUser.email === 'hussein.zebary.chemistry96@gmail.com') {
+        const pending = await getPendingProjects();
+        setPendingProjects(pending || []);
+      } else {
+        setPendingProjects([]);
+      }
+    } catch (err: any) {
+      console.error("Failed to load cloud data:", err);
+      setCloudError(err.message || "خەتا د بارکرنا داتایێن سحابێ دا ڕوویدا");
+    } finally {
+      setIsCloudLoading(false);
+    }
+  };
+
   // Initialize Firebase Auth & Sync
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       setUser(currentUser);
       if (currentUser) {
-        // Load cloud projects
-        try {
-          const projs = await getCloudProjects();
-          setCloudProjects(projs);
-        } catch (err) {
-          console.error("Failed to load cloud projects on login:", err);
-        }
-
-        // Load cloud templates
-        try {
-          const temps = await getCloudTemplates();
-          setCloudTemplates(temps || []);
-        } catch (err) {
-          console.error("Failed to load templates:", err);
-        }
+        // Load cloud projects and templates via unified loader
+        await loadAllCloudData(currentUser);
         
         // Load settings from firestore
         try {
@@ -513,6 +561,7 @@ const App: React.FC = () => {
       } else {
         setCloudProjects([]);
         setCloudTemplates([]);
+        setPendingProjects([]);
       }
 
       // Load draft (local or cloud)
@@ -2080,19 +2129,48 @@ const App: React.FC = () => {
 
     setEditorState(prev => ({ ...prev, isProcessing: true, statusMessage: '...نوێکردنەوەی دۆخی بڵاوکردنەوە' }));
     try {
-      await saveProjectToCloud(project.id, project.title, project.pages, project.canvases, !isCurrentlyPublished);
+      await approveProjectPublish(project.id, !isCurrentlyPublished);
       
       // Refresh list
-      const updatedProjs = await getCloudProjects();
-      setCloudProjects(updatedProjs);
-
-      const temps = await getCloudTemplates();
-      setCloudTemplates(temps || []);
+      await loadAllCloudData();
 
       alert(`دۆخی پڕۆژەکە بە سەرکەوتوویی نوێکرایەوە بۆ: ${!isCurrentlyPublished ? 'بڵاوکراوە وەک نموونەی گشتی' : 'تەنها تایبەت'}`);
     } catch (err: any) {
       console.error("Toggle publish failed:", err);
       alert("شکست هێنا لە گۆڕینی دۆخی بڵاوکردنەوە: " + err.message);
+    } finally {
+      setEditorState(prev => ({ ...prev, isProcessing: false, statusMessage: null }));
+    }
+  };
+
+  const handleRequestPublish = async (project: CloudProject) => {
+    if (!auth.currentUser) return;
+    const name = prompt("تکایە ناڤێ خۆ یان تێکستەکێ ناساندن بنڤیسە بۆ بەڵاڤکرنێ لسەر ناڤێ تە:", auth.currentUser.displayName || "کۆدکار");
+    if (name === null) return; // cancelled
+    
+    setEditorState(prev => ({ ...prev, isProcessing: true, statusMessage: '...ناردنی داواکارییا بەڵاڤکرنێ' }));
+    try {
+      await requestProjectPublish(project.id, name || "کۆدکار", auth.currentUser.email || "");
+      await loadAllCloudData();
+      alert("داواکارییا تە ب سەرکەوتوویی بۆ ئەدمینی هاتە فرێکرن! دێ هێتە بەڵاڤکرن پشتی ئەدمین پەسەند دکەتن. 🎉");
+    } catch (err: any) {
+      console.error("Request publish failed:", err);
+      alert("خەتا د فرێکرنا داواکاریێ دا: " + err.message);
+    } finally {
+      setEditorState(prev => ({ ...prev, isProcessing: false, statusMessage: null }));
+    }
+  };
+
+  const handleApprovePublish = async (project: CloudProject, isApproved: boolean) => {
+    if (!auth.currentUser) return;
+    setEditorState(prev => ({ ...prev, isProcessing: true, statusMessage: '...نوێکردنەوەی بڕیارا بڵاوکردنەوەی ئەدمین' }));
+    try {
+      await approveProjectPublish(project.id, isApproved);
+      await loadAllCloudData();
+      alert(isApproved ? "پڕۆژە ب سەرکەوتوویی هاتە پەسەندکرن و بەڵاڤکرن! 🚀" : "پڕۆژە هاتە ڕەتکرن.");
+    } catch (err: any) {
+      console.error("Admin decision failed:", err);
+      alert("خەتا د پەسەندکرنێ دا: " + err.message);
     } finally {
       setEditorState(prev => ({ ...prev, isProcessing: false, statusMessage: null }));
     }
@@ -2107,15 +2185,7 @@ const App: React.FC = () => {
     setEditorState(prev => ({ ...prev, isProcessing: true, statusMessage: '...سڕینەوەی پڕۆژە لەسەر سحاب' }));
     try {
       await deleteProjectFromCloud(projectId);
-      const updated = await getCloudProjects();
-      setCloudProjects(updated);
-      
-      // Also sync template list if admin deleted
-      if (auth.currentUser?.email === 'hussein.zebary.chemistry96@gmail.com') {
-        const temps = await getCloudTemplates();
-        setCloudTemplates(temps || []);
-      }
-      
+      await loadAllCloudData();
       alert("پڕۆژەکە بە سەرکەوتوویی سڕایەوە.");
     } catch (err: any) {
       console.error(err);
@@ -2332,227 +2402,24 @@ const App: React.FC = () => {
 
             {/* Tab 3: Firebase Cloud Settings */}
             {settingsTab === 'cloud' && (
-              <div className="space-y-4 text-right animate-in fade-in duration-200" dir="rtl">
-                {!user ? (
-                  <div className="flex flex-col items-center justify-center p-6 text-center space-y-4 bg-black/25 rounded-xl border border-gray-800">
-                    <div className="p-3 bg-primary/10 rounded-full text-primary">
-                      <Icons.Globe size={32} />
-                    </div>
-                    <div>
-                      <h4 className="text-sm font-bold text-white mb-1">پاشەکەوتکردنا پڕۆژان ل سەر سحابێ</h4>
-                      <p className="text-xs text-gray-400 max-w-sm leading-relaxed">
-                        بچۆ ژوورەوە ب ڕێیا ئەکاونتێ خۆ یێ گوگل بۆ هەڵگرتن، بارکرن، و کۆنترۆڵکرنا پڕۆژێن خۆ یێن PDF ب شێوازەکێ پاراستی و ئاسان ل سەر هەر ئامیرەکێ.
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        try {
-                          await signInWithGoogle();
-                        } catch (err: any) {
-                          alert("شکست هێنا لە چوونەژوورەوە: " + err.message);
-                        }
-                      }}
-                      className="flex items-center gap-2 px-5 py-2.5 bg-white hover:bg-gray-100 text-black font-extrabold text-xs rounded-xl transition-all shadow-md cursor-pointer mx-auto"
-                    >
-                      <svg className="w-4 h-4" viewBox="0 0 24 24">
-                        <path
-                          fill="#4285F4"
-                          d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
-                        />
-                        <path
-                          fill="#34A853"
-                          d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
-                        />
-                        <path
-                          fill="#FBBC05"
-                          d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"
-                        />
-                        <path
-                          fill="#EA4335"
-                          d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
-                        />
-                      </svg>
-                      <span>بچۆ ژوورەوە ب ڕێیا گوگل (Sign In)</span>
-                    </button>
-                  </div>
-                ) : (
-                  <div className="space-y-4 animate-in fade-in duration-200">
-                    {/* User Card */}
-                    <div className="flex items-center justify-between p-3 bg-black/40 rounded-xl border border-gray-800">
-                      <div className="flex items-center gap-2.5 text-right">
-                        {user.photoURL ? (
-                          <img src={user.photoURL} alt={user.displayName || ''} className="w-9 h-9 rounded-full border border-gray-750" referrerPolicy="no-referrer" />
-                        ) : (
-                          <div className="w-9 h-9 rounded-full bg-primary/20 flex items-center justify-center text-primary font-bold text-sm">
-                            {user.displayName?.charAt(0) || user.email?.charAt(0) || 'U'}
-                          </div>
-                        )}
-                        <div>
-                          <p className="text-xs font-extrabold text-white">{user.displayName || 'بەکارهێنەری سحاب'}</p>
-                          <p className="text-[10px] text-gray-400">{user.email}</p>
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          try {
-                            await logOut();
-                          } catch (err: any) {
-                            alert("شکست هێنا لە چوونەدەرەوە: " + err.message);
-                          }
-                        }}
-                        className="px-3 py-1.5 bg-red-600/15 hover:bg-red-600/30 text-red-400 font-bold text-[10px] rounded-lg transition-all"
-                      >
-                        چوونەدەر (Logout)
-                      </button>
-                    </div>
-
-                    {/* Save Current Project Section */}
-                    <div className="p-3 bg-black/20 rounded-xl border border-gray-800 space-y-2">
-                      <label className="text-[10px] text-gray-400 font-extrabold uppercase tracking-wider block">
-                        پاشەکەوتکردنا پڕۆژێ نووکە ل سەر سحابێ (Save Current Project)
-                      </label>
-                      <div className="flex gap-2">
-                        <input
-                          type="text"
-                          value={saveTitle}
-                          onChange={(e) => setSaveTitle(e.target.value)}
-                          placeholder="ناونیشانێ پڕۆژەی بنووسە (بۆ نموونە: پڕۆژێ کیمیا)..."
-                          className="flex-1 bg-zinc-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-primary text-right"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => handleSaveProjectToCloud()}
-                          className="px-4 py-2 bg-primary hover:opacity-90 text-white rounded-lg font-bold text-xs flex items-center gap-1.5 transition-opacity"
-                        >
-                          <Icons.Save size={14} />
-                          <span>پاشەکەوتکرن</span>
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Cloud Projects List */}
-                    <div className="space-y-2 text-right">
-                      <h4 className="text-[10px] text-gray-400 font-extrabold uppercase tracking-wider block">
-                        پڕۆژێن بارکری ل سەر سحابێ ({cloudProjects.length})
-                      </h4>
-                      
-                      <div className="max-h-[180px] overflow-y-auto space-y-1.5 pr-0.5">
-                        {cloudProjects.length === 0 ? (
-                          <p className="text-[11px] text-gray-500 py-6 text-center border border-dashed border-gray-800 rounded-lg">
-                            چ پڕۆژە نینن ل سەر سحابێ. پڕۆژەکێ نوکە پاشەکەوت بکە!
-                          </p>
-                        ) : (
-                          cloudProjects.map((proj) => {
-                            const updatedDate = proj.updatedAt?.seconds 
-                              ? new Date(proj.updatedAt.seconds * 1000).toLocaleString('ku-IQ', { dateStyle: 'short', timeStyle: 'short' })
-                              : new Date().toLocaleString('ku-IQ', { dateStyle: 'short', timeStyle: 'short' });
-                            return (
-                              <div
-                                key={proj.id}
-                                className="flex items-center justify-between p-2.5 bg-zinc-900/60 hover:bg-zinc-900 border border-gray-800 hover:border-gray-750 rounded-lg transition-all text-right"
-                              >
-                                <div className="flex-1 min-w-0 pr-2">
-                                  <p className="text-xs font-bold text-white truncate flex items-center justify-end gap-1">
-                                    {proj.isPublished && (
-                                      <span className="px-1.5 py-0.5 bg-indigo-500/15 text-indigo-400 text-[9px] rounded font-extrabold">بڵاوکراوە</span>
-                                    )}
-                                    {proj.title}
-                                  </p>
-                                  <div className="flex gap-2 text-[10px] text-gray-400 mt-0.5">
-                                    <span>{proj.pages?.length || 0} لاپەڕە</span>
-                                    <span>•</span>
-                                    <span>{updatedDate}</span>
-                                  </div>
-                                </div>
-                                
-                                <div className="flex gap-1.5 shrink-0">
-                                  {user && user.email === 'hussein.zebary.chemistry96@gmail.com' && (
-                                    <button
-                                      type="button"
-                                      onClick={() => handleTogglePublish(proj)}
-                                      className={`p-1 rounded-md transition-all ${proj.isPublished ? 'bg-indigo-600/25 hover:bg-indigo-600/40 text-indigo-400' : 'bg-gray-700/20 hover:bg-gray-750 text-gray-400'}`}
-                                      title={proj.isPublished ? "لابردنی بڵاوکردنەوە" : "بڵاوکردنەوە بۆ هەمووان"}
-                                    >
-                                      <Icons.Globe size={12} />
-                                    </button>
-                                  )}
-                                  <button
-                                    type="button"
-                                    onClick={() => handleLoadProjectFromCloud(proj)}
-                                    className="px-2.5 py-1 bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-400 font-extrabold text-[10px] rounded-md transition-all flex items-center gap-1"
-                                  >
-                                    <Icons.Upload size={10} />
-                                    <span>بارکرن</span>
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleDeleteProjectFromCloud(proj.id, proj.title)}
-                                    className="p-1 bg-red-600/10 hover:bg-red-600/30 text-red-400 rounded-md transition-all"
-                                    title="Delete from Cloud"
-                                  >
-                                    <Icons.Trash size={12} />
-                                  </button>
-                                </div>
-                              </div>
-                            );
-                          })
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Published Admin Templates Section */}
-                    <div className="space-y-2 text-right mt-4 border-t border-gray-800 pt-4">
-                      <h4 className="text-[10px] text-gray-400 font-extrabold uppercase tracking-wider block">
-                        پڕۆژێن بەڵاڤکراو یێن ئەدمینی ({cloudTemplates.length})
-                      </h4>
-                      
-                      <div className="max-h-[180px] overflow-y-auto space-y-1.5 pr-0.5">
-                        {cloudTemplates.length === 0 ? (
-                          <p className="text-[11px] text-gray-500 py-4 text-center border border-dashed border-gray-800 rounded-lg">
-                            هیچ پڕۆژەیەکی بەڵاڤکراو بەردەست نییە نوکە.
-                          </p>
-                        ) : (
-                          cloudTemplates.map((proj) => {
-                            const updatedDate = proj.updatedAt?.seconds 
-                              ? new Date(proj.updatedAt.seconds * 1000).toLocaleString('ku-IQ', { dateStyle: 'short', timeStyle: 'short' })
-                              : new Date().toLocaleString('ku-IQ', { dateStyle: 'short', timeStyle: 'short' });
-                            return (
-                              <div
-                                key={proj.id}
-                                className="flex items-center justify-between p-2.5 bg-indigo-950/20 hover:bg-indigo-950/35 border border-indigo-900/40 rounded-lg transition-all text-right"
-                              >
-                                <div className="flex-1 min-w-0 pr-2">
-                                  <p className="text-xs font-bold text-white truncate flex items-center justify-end gap-1">
-                                    <span className="px-1.5 py-0.5 bg-indigo-500/10 text-indigo-300 text-[9px] rounded font-extrabold">نموونەی گشتی</span>
-                                    {proj.title}
-                                  </p>
-                                  <div className="flex gap-2 text-[10px] text-gray-400 mt-0.5">
-                                    <span>{proj.pages?.length || 0} لاپەڕە</span>
-                                    <span>•</span>
-                                    <span>{updatedDate}</span>
-                                  </div>
-                                </div>
-                                
-                                <div className="flex gap-1.5 shrink-0">
-                                  <button
-                                    type="button"
-                                    onClick={() => handleLoadProjectFromCloud(proj)}
-                                    className="px-2.5 py-1 bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-400 font-extrabold text-[10px] rounded-md transition-all flex items-center gap-1"
-                                  >
-                                    <Icons.Copy size={10} />
-                                    <span>بارکرن و کۆپی</span>
-                                  </button>
-                                </div>
-                              </div>
-                            );
-                          })
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                )}
+              <div className="space-y-4 text-right animate-in fade-in duration-200 py-6 text-center" dir="rtl">
+                <div className="p-3 bg-blue-500/10 rounded-full text-blue-400 w-max mx-auto mb-2">
+                  <Icons.Globe size={32} />
+                </div>
+                <h4 className="text-sm font-bold text-white">کۆگەیا نیشتمانی یا سحابێ</h4>
+                <p className="text-xs text-zinc-400 max-w-sm mx-auto leading-relaxed">
+                  بۆ پاشەکەوتکردن، بارکردن، بڵاوکردنەوەی گشتی و بەڕێوەبردنی پڕۆژەکان لەسەر سحابێ، تکایە پانێڵی تایبەت بەکاربهێنە کە لە بەشی سەرەوەی ڕاست بەردەستە.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowApiModal(false);
+                    setShowProjectsModal(true);
+                  }}
+                  className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold text-xs shadow-md mt-4 inline-block transition-all hover:scale-105"
+                >
+                  کردنەوەی دۆڵابی پڕۆژەکان (Open Projects Closet)
+                </button>
               </div>
             )}
 
@@ -2585,6 +2452,571 @@ const App: React.FC = () => {
                   </button>
                 )}
               </div>
+            </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* Floating Top Right Projects Toggles */}
+      <div className="fixed top-4 right-4 z-[90] flex gap-2" dir="rtl">
+        {/* Button 1: My Projects */}
+        <button
+          onClick={() => {
+            setProjectsTab('my');
+            setShowProjectsModal(true);
+            loadAllCloudData();
+          }}
+          className="flex items-center gap-1.5 px-4 py-2.5 bg-zinc-950/90 hover:bg-zinc-900 text-white border border-zinc-800 rounded-xl shadow-2xl backdrop-blur-md transition-all active:scale-95 text-xs font-bold"
+          title="پڕۆژێن من (My Projects)"
+        >
+          <Icons.File size={14} className="text-blue-400" />
+          <span>پڕۆژێن من</span>
+        </button>
+
+        {/* Button 2: Public Projects */}
+        <button
+          onClick={() => {
+            setProjectsTab('public');
+            setShowProjectsModal(true);
+            loadAllCloudData();
+          }}
+          className="flex items-center gap-1.5 px-4 py-2.5 bg-zinc-950/90 hover:bg-zinc-900 text-white border border-zinc-800 rounded-xl shadow-2xl backdrop-blur-md transition-all active:scale-95 text-xs font-bold"
+          title="پڕۆژێن گشتی (Public Projects)"
+        >
+          <Icons.Globe size={14} className="text-emerald-400 animate-pulse" />
+          <span>پڕۆژێن گشتی</span>
+        </button>
+
+        {/* Admin Pending Requests Notification */}
+        {user && user.email === 'hussein.zebary.chemistry96@gmail.com' && (
+          <button
+            onClick={() => {
+              setProjectsTab('pending');
+              setShowProjectsModal(true);
+              loadAllCloudData();
+            }}
+            className="flex items-center gap-1.5 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl shadow-2xl transition-all active:scale-95 text-xs font-bold relative border border-indigo-500/20"
+            title="پڕۆژێن ل چاوەڕوانیێ (Pending Requests)"
+          >
+            <Icons.Settings size={14} className="animate-spin duration-1000" />
+            <span>داواکاری</span>
+            {pendingProjects.length > 0 && (
+              <span className="absolute -top-1.5 -left-1.5 w-5 h-5 bg-red-500 text-white rounded-full text-[10px] flex items-center justify-center font-bold border-2 border-zinc-950 animate-bounce">
+                {pendingProjects.length}
+              </span>
+            )}
+          </button>
+        )}
+      </div>
+
+      {/* Custom Projects & Auth Modal */}
+      {showProjectsModal && (
+        <div className="fixed inset-0 bg-black/95 z-[115] flex items-center justify-center p-4 backdrop-blur-md animate-in fade-in duration-200">
+          <div className="bg-zinc-950 border border-zinc-800 p-6 rounded-2xl w-full max-w-xl shadow-2xl relative text-right flex flex-col max-h-[90vh]">
+            
+            {/* Modal Header */}
+            <div className="flex justify-between items-center border-b border-zinc-800 pb-4 mb-4" dir="rtl">
+              <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                {projectsTab === 'my' && <Icons.File className="text-blue-400" />}
+                {projectsTab === 'public' && <Icons.Globe className="text-emerald-400" />}
+                {projectsTab === 'pending' && <Icons.Settings className="text-indigo-400" />}
+                <span>
+                  {projectsTab === 'my' && "پڕۆژێن من یێن سحابێ"}
+                  {projectsTab === 'public' && "پڕۆژێن گشتی و نموونەیی"}
+                  {projectsTab === 'pending' && "پەسەندکردنا پڕۆژان (Admin Panel)"}
+                </span>
+              </h3>
+              <button 
+                onClick={() => setShowProjectsModal(false)}
+                className="p-1.5 text-zinc-400 hover:text-white hover:bg-zinc-900 rounded-lg transition-all"
+              >
+                <Icons.X size={18} />
+              </button>
+            </div>
+
+            {/* Tab Swapping inside the modal */}
+            <div className="flex gap-1.5 p-1 bg-zinc-900/60 rounded-xl mb-4 border border-zinc-800/40" dir="rtl">
+              <button
+                onClick={() => setProjectsTab('my')}
+                className={`flex-1 py-2 rounded-lg font-extrabold text-[11px] transition-all flex items-center justify-center gap-1 ${projectsTab === 'my' ? 'bg-blue-600 text-white shadow-lg' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`}
+              >
+                <Icons.File size={12} />
+                <span>پڕۆژێن من</span>
+              </button>
+              <button
+                onClick={() => setProjectsTab('public')}
+                className={`flex-1 py-2 rounded-lg font-extrabold text-[11px] transition-all flex items-center justify-center gap-1 ${projectsTab === 'public' ? 'bg-emerald-600 text-white shadow-lg' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`}
+              >
+                <Icons.Globe size={12} />
+                <span>پڕۆژێن گشتی</span>
+              </button>
+              {user && user.email === 'hussein.zebary.chemistry96@gmail.com' && (
+                <button
+                  onClick={() => setProjectsTab('pending')}
+                  className={`flex-1 py-2 rounded-lg font-extrabold text-[11px] transition-all flex items-center justify-center gap-1 relative ${projectsTab === 'pending' ? 'bg-indigo-600 text-white shadow-lg' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`}
+                >
+                  <Icons.Settings size={12} />
+                  <span>ڕێپێدانێن گشتی</span>
+                  {pendingProjects.length > 0 && (
+                    <span className="absolute -top-1 -left-1 w-4 h-4 bg-red-500 text-white rounded-full text-[9px] flex items-center justify-center font-bold">
+                      {pendingProjects.length}
+                    </span>
+                  )}
+                </button>
+              )}
+            </div>
+
+            {/* Modal Main Content Container */}
+            <div className="flex-1 overflow-y-auto pr-1" dir="rtl">
+              {/* TAB 1: MY PROJECTS */}
+              {projectsTab === 'my' && (
+                <div className="space-y-4">
+                  {!user ? (
+                    /* Auth Section */
+                    <div className="space-y-4 py-2">
+                      <div className="text-center space-y-2 bg-zinc-900/40 p-4 rounded-xl border border-zinc-800/60">
+                        <p className="text-xs text-zinc-400 leading-relaxed">
+                          بۆ پاشەکەوتکرنا کارێن خۆ و پاراستنا وان ل سەر هەر ئامیرەکێ، بچۆ د ئەکاونتێ خۆ دا ب هەر شێوازەکێ دڤێت:
+                        </p>
+                      </div>
+
+                      {/* Google Sign In */}
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            await signInWithGoogle();
+                          } catch (err: any) {
+                            alert("چوونەژوورەوە شکست هێنا: " + err.message);
+                          }
+                        }}
+                        className="w-full flex items-center justify-center gap-2 px-5 py-3 bg-white hover:bg-zinc-200 text-black font-bold text-xs rounded-xl transition-all shadow-xl"
+                      >
+                        <svg className="w-4 h-4" viewBox="0 0 24 24">
+                          <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                          <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                          <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" />
+                          <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
+                        </svg>
+                        <span>چوونەژوورەوە ب ئەکاونتێ گوگلێ (Google Login)</span>
+                      </button>
+
+                      <div className="flex items-center gap-3 my-2 text-zinc-600 text-xs justify-center">
+                        <div className="h-[1px] bg-zinc-800 flex-1"></div>
+                        <span>یان ب ڕێیا ئیمەیڵێ</span>
+                        <div className="h-[1px] bg-zinc-800 flex-1"></div>
+                      </div>
+
+                      {/* Custom Email Auth Form */}
+                      <div className="bg-zinc-900/60 p-4 rounded-xl border border-zinc-800 space-y-3">
+                        {authIsSignUp && (
+                          <div className="space-y-1">
+                            <label className="text-[10px] text-zinc-400 font-bold block text-right">ناڤێ خۆ (Display Name)</label>
+                            <input
+                              type="text"
+                              value={authDisplayName}
+                              onChange={(e) => setAuthDisplayName(e.target.value)}
+                              placeholder="ناڤێ تە ل سەر پڕۆژێن بەڵاڤکراو..."
+                              className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-blue-500 text-right"
+                            />
+                          </div>
+                        )}
+                        <div className="space-y-1">
+                          <label className="text-[10px] text-zinc-400 font-bold block text-right">ئیمەیڵ (Email)</label>
+                          <input
+                            type="email"
+                            value={authEmail}
+                            onChange={(e) => setAuthEmail(e.target.value)}
+                            placeholder="example@kpdf.com"
+                            className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-blue-500 text-left"
+                            dir="ltr"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-[10px] text-zinc-400 font-bold block text-right">پەیڤا نهێنی (Password)</label>
+                          <input
+                            type="password"
+                            value={authPassword}
+                            onChange={(e) => setAuthPassword(e.target.value)}
+                            placeholder="••••••"
+                            className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-blue-500 text-left"
+                            dir="ltr"
+                          />
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            if (!authEmail || !authPassword) {
+                              alert("تکایە هەمی جەها تژی بکە!");
+                              return;
+                            }
+                            try {
+                              setEditorState(prev => ({ ...prev, isProcessing: true, statusMessage: 'تێپەڕبوونا کاربەر...' }));
+                              if (authIsSignUp) {
+                                await registerWithEmail(authEmail, authPassword, authDisplayName || 'کۆدکارێ نوو');
+                                alert("ئەکاونت ب سەرکەوتوویی هاتە تۆمارکرن! 🎉");
+                              } else {
+                                await loginWithEmail(authEmail, authPassword);
+                                alert("بخێر بێی پڕۆژێن تە باربوون! 🎉");
+                              }
+                            } catch (err: any) {
+                              alert("خەتا د چوونەژوورەوە دا ڕوویدا: " + err.message);
+                            } finally {
+                              setEditorState(prev => ({ ...prev, isProcessing: false, statusMessage: null }));
+                            }
+                          }}
+                          className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-bold text-xs shadow-md transition-all mt-1"
+                        >
+                          {authIsSignUp ? "چێکرنا ئەکاونتی (Register)" : "چوونەژوورەوە (Login)"}
+                        </button>
+
+                        <div className="text-center mt-2">
+                          <button
+                            type="button"
+                            onClick={() => setAuthIsSignUp(!authIsSignUp)}
+                            className="text-xs text-blue-400 hover:underline"
+                          >
+                            {authIsSignUp ? "ئەکاونتی من هەیە؟ بچۆ ژوورەوە" : "ئەکاونتێ نوو نینە؟ لێرە تۆمار بکە"}
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-3 my-2 text-zinc-600 text-xs justify-center">
+                        <div className="h-[1px] bg-zinc-800 flex-1"></div>
+                        <span>یان ب شێوازێ مێوان</span>
+                        <div className="h-[1px] bg-zinc-800 flex-1"></div>
+                      </div>
+
+                      {/* Guest Sign In */}
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const name = prompt("تکایە ناڤێ خۆ بنڤیسە بۆ مێوانیکرنێ (یان ب سادەیی لێکبدە):", "مێوان / Guest");
+                          if (name === null) return;
+                          try {
+                            setEditorState(prev => ({ ...prev, isProcessing: true, statusMessage: 'چوونەژوور وەک مێوان...' }));
+                            await loginAsGuest(name || "مێوانێ بێناڤ");
+                          } catch (err: any) {
+                            alert("خەتا ڕوویدا: " + err.message);
+                          } finally {
+                            setEditorState(prev => ({ ...prev, isProcessing: false, statusMessage: null }));
+                          }
+                        }}
+                        className="w-full py-3 bg-zinc-800 hover:bg-zinc-700 text-zinc-100 rounded-xl font-bold text-xs transition-all shadow-md flex items-center justify-center gap-1.5"
+                      >
+                        <span className="text-yellow-500 font-extrabold text-sm">👤</span>
+                        <span>چوونەژوورەوە وەک مێوان (Anonymous Login)</span>
+                      </button>
+                    </div>
+                  ) : (
+                    /* Authenticated Projects Dashboard */
+                    <div className="space-y-4">
+                      {/* User Badge */}
+                      <div className="flex items-center justify-between p-3.5 bg-zinc-900/60 rounded-xl border border-zinc-850">
+                        <div className="flex items-center gap-3 text-right">
+                          <div className="w-10 h-10 rounded-full bg-blue-500/20 flex items-center justify-center text-blue-400 font-bold text-base border border-blue-500/20">
+                            {user.displayName?.charAt(0) || user.email?.charAt(0) || 'U'}
+                          </div>
+                          <div>
+                            <p className="text-xs font-extrabold text-white">{user.displayName || 'کۆدکارێ سحابێ'}</p>
+                            <p className="text-[10px] text-zinc-500 font-mono mt-0.5">{user.email || 'guest@kpdf.local'}</p>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            if (window.confirm("ئەرێ تو دڵنیایی دەتەوێ بچییە دەر؟")) {
+                              await logOut();
+                            }
+                          }}
+                          className="px-3 py-1.5 bg-zinc-800 hover:bg-red-950/40 hover:text-red-400 hover:border-red-900/20 border border-zinc-700 text-zinc-400 font-bold text-[10px] rounded-lg transition-all"
+                        >
+                          دەرکەفتن (Logout)
+                        </button>
+                      </div>
+
+                      {/* Save Current Work */}
+                      <div className="p-4 bg-zinc-900/40 rounded-xl border border-zinc-850 space-y-2.5">
+                        <label className="text-[10px] text-zinc-400 font-bold uppercase tracking-wider block">
+                          پاشەکەوتکرنا پڕۆژێ کار ل سەر دکەی (Save Current Work)
+                        </label>
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={saveTitle}
+                            onChange={(e) => setSaveTitle(e.target.value)}
+                            placeholder="ناڤ نیشانێ پڕۆژەی (ب نموونە: بیرکاری لاپەڕە ٥)..."
+                            className="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-blue-500 text-right"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!saveTitle.trim()) {
+                                alert("تکایە سەرەتا ناڤەکێ بنڤیسە");
+                                return;
+                              }
+                              handleSaveProjectToCloud();
+                            }}
+                            className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-bold text-xs flex items-center gap-1.5 transition-colors shadow-md"
+                          >
+                            <Icons.Save size={12} />
+                            <span>پاشەکەوتکرن</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* User's Cloud Projects List */}
+                      <div className="space-y-2">
+                        <h4 className="text-[11px] text-zinc-400 font-extrabold uppercase tracking-wider block">
+                          پڕۆژێن من یێن پاشەکەوتکری ({cloudProjects.length})
+                        </h4>
+                        
+                        <div className="max-h-[300px] overflow-y-auto space-y-2 pr-1">
+                          {isCloudLoading ? (
+                            <div className="py-12 text-center text-xs text-zinc-400 flex flex-col items-center gap-2">
+                              <Icons.Loader size={20} className="animate-spin text-blue-400" />
+                              <span>...بارکرنا پڕۆژان</span>
+                            </div>
+                          ) : cloudProjects.length === 0 ? (
+                            <div className="py-12 text-center text-xs text-zinc-500 border border-dashed border-zinc-850 rounded-xl bg-zinc-900/10">
+                              چ پڕۆژە ل سەر سحابێ نینن. پڕۆژێ خۆ پاشەکەوت بکە بۆ ئەوی هەمی گاڤا بمینیت!
+                            </div>
+                          ) : (
+                            cloudProjects.map((proj) => {
+                              const updatedDate = proj.updatedAt?.seconds 
+                                ? new Date(proj.updatedAt.seconds * 1000).toLocaleString('ku-IQ', { dateStyle: 'short', timeStyle: 'short' })
+                                : new Date().toLocaleString('ku-IQ', { dateStyle: 'short', timeStyle: 'short' });
+                              return (
+                                <div
+                                  key={proj.id}
+                                  className="flex flex-col sm:flex-row sm:items-center justify-between p-3 bg-zinc-900/30 hover:bg-zinc-900/60 border border-zinc-850 hover:border-zinc-800 rounded-xl transition-all gap-2"
+                                >
+                                  <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-2 justify-start flex-row-reverse">
+                                      <p className="text-xs font-extrabold text-white truncate text-right">
+                                        {proj.title}
+                                      </p>
+                                      {proj.isPublished && (
+                                        <span className="px-1.5 py-0.5 bg-emerald-500/15 text-emerald-400 text-[9px] rounded font-bold">بەڵاڤکری گشتی</span>
+                                      )}
+                                      {proj.requestPublish && !proj.isPublished && (
+                                        <span className="px-1.5 py-0.5 bg-yellow-500/15 text-yellow-400 text-[9px] rounded font-bold">چاوەڕێی ڕێپێدانێ</span>
+                                      )}
+                                    </div>
+                                    <div className="flex gap-2 text-[10px] text-zinc-500 mt-1 flex-row-reverse justify-end">
+                                      <span>{proj.pages?.length || 0} لاپەڕە</span>
+                                      <span>•</span>
+                                      <span>{updatedDate}</span>
+                                    </div>
+                                  </div>
+                                  
+                                  <div className="flex gap-1.5 justify-end">
+                                    {/* Request Public Publish button */}
+                                    {!proj.isPublished && !proj.requestPublish && (
+                                      <button
+                                        type="button"
+                                        onClick={() => handleRequestPublish(proj)}
+                                        className="px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-extrabold text-[10px] rounded-lg transition-all flex items-center gap-1 border border-zinc-700"
+                                        title="داواکاری بکە بۆ بڵاوکردنەوەی گشتی"
+                                      >
+                                        <Icons.Globe size={11} className="text-zinc-400" />
+                                        <span>بەڵاڤکرنا گشتی</span>
+                                      </button>
+                                    )}
+
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        handleLoadProjectFromCloud(proj);
+                                        setShowProjectsModal(false);
+                                      }}
+                                      className="px-3 py-1.5 bg-blue-600/20 hover:bg-blue-600/40 text-blue-400 font-extrabold text-[10px] rounded-lg transition-all flex items-center gap-1 border border-blue-500/20"
+                                    >
+                                      <Icons.Upload size={11} />
+                                      <span>بارکرن</span>
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDeleteProjectFromCloud(proj.id, proj.title)}
+                                      className="p-1.5 bg-red-600/10 hover:bg-red-600/30 text-red-400 rounded-lg transition-all border border-red-500/10"
+                                      title="سڕینەوە"
+                                    >
+                                      <Icons.Trash size={12} />
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* TAB 2: PUBLIC PROJECTS */}
+              {projectsTab === 'public' && (
+                <div className="space-y-4">
+                  <div className="text-center space-y-1 bg-zinc-900/40 p-3.5 rounded-xl border border-zinc-850 mb-2">
+                    <p className="text-xs text-zinc-400 leading-relaxed">
+                      ئەڤە ئەو پڕۆژە و شیتێن گشتینە کو ژ لایێ پڕۆژەکاران ڤە هاتینە بەڵاڤکرن و ژ لایێ ئەدمینی ڤە ڕێپێدان پێ هاتیە دان:
+                    </p>
+                  </div>
+
+                  <div className="max-h-[400px] overflow-y-auto space-y-2 pr-1">
+                    {isCloudLoading ? (
+                      <div className="py-12 text-center text-xs text-zinc-400 flex flex-col items-center gap-2">
+                        <Icons.Loader size={20} className="animate-spin text-emerald-400" />
+                        <span>...بارکرنا پڕۆژێن گشتی</span>
+                      </div>
+                    ) : cloudTemplates.length === 0 ? (
+                      <div className="py-12 text-center text-xs text-zinc-500 border border-dashed border-zinc-850 rounded-xl bg-zinc-900/10">
+                        هیچ پڕۆژەیەکی گشتی بڵاوکراوە بەردەست نییە نوکە.
+                      </div>
+                    ) : (
+                      cloudTemplates.map((proj) => {
+                        const updatedDate = proj.updatedAt?.seconds 
+                          ? new Date(proj.updatedAt.seconds * 1000).toLocaleString('ku-IQ', { dateStyle: 'short' })
+                          : new Date().toLocaleString('ku-IQ', { dateStyle: 'short' });
+                        return (
+                          <div
+                            key={proj.id}
+                            className="flex flex-col sm:flex-row sm:items-center justify-between p-3.5 bg-zinc-900/20 hover:bg-zinc-900/40 border border-emerald-950 hover:border-emerald-900 rounded-xl transition-all gap-2"
+                          >
+                            <div className="flex-1 min-w-0">
+                              <p className="text-xs font-extrabold text-white truncate text-right">
+                                {proj.title}
+                              </p>
+                              <div className="flex gap-2 text-[10px] text-zinc-500 mt-1.5 flex-row-reverse justify-end items-center flex-wrap">
+                                <span className="px-1.5 py-0.5 bg-emerald-500/10 text-emerald-400 rounded text-[9px] font-bold">بەلایەنێ: {proj.authorName || 'کۆدکار'}</span>
+                                {proj.authorEmail && user && user.email === 'hussein.zebary.chemistry96@gmail.com' && (
+                                  <span className="text-zinc-600 text-[9px] font-mono">{proj.authorEmail}</span>
+                                )}
+                                <span>•</span>
+                                <span>{proj.pages?.length || 0} لاپەڕە</span>
+                                <span>•</span>
+                                <span>{updatedDate}</span>
+                              </div>
+                            </div>
+                            
+                            <div className="flex gap-1.5 justify-end shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  handleLoadProjectFromCloud(proj);
+                                  setShowProjectsModal(false);
+                                }}
+                                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold text-[10px] rounded-lg transition-all flex items-center gap-1 shadow-lg shadow-emerald-500/10"
+                              >
+                                <Icons.Copy size={11} />
+                                <span>کۆپی و بارکرن</span>
+                              </button>
+
+                              {/* Admin action: Unpublish */}
+                              {user && user.email === 'hussein.zebary.chemistry96@gmail.com' && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleTogglePublish(proj)}
+                                  className="p-1.5 bg-red-600/10 hover:bg-red-600/30 text-red-400 rounded-lg transition-all border border-red-500/10"
+                                  title="لابردنی بەڵاڤکردنەوەی گشتی"
+                                >
+                                  <Icons.X size={12} />
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* TAB 3: PENDING APPROVALS (ADMIN ONLY) */}
+              {projectsTab === 'pending' && user && user.email === 'hussein.zebary.chemistry96@gmail.com' && (
+                <div className="space-y-4">
+                  <div className="bg-indigo-950/20 p-3.5 rounded-xl border border-indigo-900/40 mb-2">
+                    <p className="text-xs text-indigo-300 leading-relaxed text-right">
+                      بۆماڵپەڕێ ئەدمینێ بەڕێز حسین زێباری: ئەڤە ئەو پڕۆژەنە یێن بەکارهێنەران داواکاری ل سەر کرین بۆ بڵاوکردنەوەی گشتی. پەسەند بکە بۆ ئەوی هەمی کەس پێ ببینیتن:
+                    </p>
+                  </div>
+
+                  <div className="max-h-[400px] overflow-y-auto space-y-2 pr-1">
+                    {isCloudLoading ? (
+                      <div className="py-12 text-center text-xs text-zinc-400 flex flex-col items-center gap-2">
+                        <Icons.Loader size={20} className="animate-spin text-indigo-400" />
+                        <span>......بارکرنا داواکاریان</span>
+                      </div>
+                    ) : pendingProjects.length === 0 ? (
+                      <div className="py-12 text-center text-xs text-zinc-500 border border-dashed border-zinc-850 rounded-xl bg-zinc-900/10">
+                        چ داواکارییەکا بەڵاڤکرنێ د چاوەڕوانیێ دا نینە نوکە.
+                      </div>
+                    ) : (
+                      pendingProjects.map((proj) => {
+                        return (
+                          <div
+                            key={proj.id}
+                            className="flex flex-col p-3.5 bg-zinc-900/40 border border-indigo-900/50 rounded-xl transition-all gap-3"
+                          >
+                            <div className="flex-1 text-right">
+                              <h4 className="text-xs font-extrabold text-white">{proj.title}</h4>
+                              <div className="flex flex-col gap-1 mt-2 text-[10px] text-zinc-400">
+                                <div className="flex justify-end gap-1.5">
+                                  <span className="text-zinc-200 font-bold">{proj.authorName || 'نەدیار'}</span>
+                                  <span className="text-zinc-500">:ناڤێ کۆدکاری</span>
+                                </div>
+                                <div className="flex justify-end gap-1.5 font-mono">
+                                  <span className="text-zinc-300">{proj.authorEmail || 'بێ ئیمەیڵ'}</span>
+                                  <span className="text-zinc-500">:ئیمەیڵێ وی</span>
+                                </div>
+                                <div className="flex justify-end gap-1.5">
+                                  <span className="text-zinc-300">{proj.pages?.length || 0} لاپەڕە</span>
+                                  <span className="text-zinc-500">:ڕێژەیا لاپەڕان</span>
+                                </div>
+                              </div>
+                            </div>
+                            
+                            <div className="flex gap-2 justify-end border-t border-zinc-850 pt-2.5">
+                              <button
+                                type="button"
+                                onClick={() => handleApprovePublish(proj, true)}
+                                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-extrabold text-[11px] rounded-lg transition-all flex items-center gap-1 shadow-md shadow-indigo-600/10"
+                              >
+                                <Icons.Check size={12} />
+                                <span>پەسەندکرن (Approve)</span>
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => handleApprovePublish(proj, false)}
+                                className="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 font-extrabold text-[11px] rounded-lg transition-all flex items-center gap-1 border border-zinc-700"
+                              >
+                                <Icons.X size={12} />
+                                <span>ڕەتکرن (Reject)</span>
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="flex justify-between items-center mt-5 border-t border-zinc-800 pt-4" dir="rtl">
+              <span className="text-[10px] text-zinc-500 font-mono">KPDF Cloud Sync Panel</span>
+              <button 
+                onClick={() => setShowProjectsModal(false)} 
+                className="px-4 py-1.5 text-xs font-bold bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-white rounded-lg transition-colors"
+              >
+                پاشەکەوت و داخستن
+              </button>
             </div>
 
           </div>

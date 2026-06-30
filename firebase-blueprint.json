@@ -21,6 +21,18 @@
         "isPublished": {
           "type": "boolean",
           "description": "Whether this project is published as a template/public project by the admin."
+        },
+        "requestPublish": {
+          "type": "boolean",
+          "description": "Whether the user requested this project to be published."
+        },
+        "authorName": {
+          "type": "string",
+          "description": "The display name of the project author."
+        },
+        "authorEmail": {
+          "type": "string",
+          "description": "The email of the project author."
         }
       },
       "required": ["title", "userId", "pages", "canvases", "createdAt", "updatedAt"]
