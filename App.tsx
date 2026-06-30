@@ -2038,6 +2038,88 @@ const App: React.FC = () => {
     }
   };
 
+  const handleStartNewProject = () => {
+    // Clear fabric canvas instances from canvasesRef
+    Object.values(canvasesRef.current).forEach(canvas => {
+      if (canvas) {
+        canvas.clear();
+      }
+    });
+    canvasesRef.current = {};
+    canvasHistoryRef.current = {};
+    pdfDocRef.current = null;
+    pendingCanvasesRef.current = null;
+    
+    // Clear pages to show welcome starter screen
+    setPages([]);
+    setActivePage(1);
+    setSaveTitle('');
+    localStorage.removeItem('kurdish_pdf_active_draft');
+  };
+
+  const handlePublishAndNewProject = async () => {
+    if (!auth.currentUser) {
+      alert("تکایە سەرەتا بچۆ ژوورەوە یان وەک مێوان تۆمار بکە بۆ بڵاوکردنەوەی پڕۆژەی (Please login or join as guest to publish)");
+      setProjectsTab('my');
+      setShowProjectsModal(true);
+      return;
+    }
+    if (pages.length === 0) {
+      alert("هیچ لاپەڕەیەک نییە بۆ بڵاوکردنەوە (No pages to publish)");
+      return;
+    }
+
+    const title = prompt("ناونیشانێک بنووسە بۆ بڵاوکردنەوەی پڕۆژەکەت (Enter a name to publish this project):", saveTitle || "");
+    if (title === null) return; // User cancelled
+    
+    const trimmedTitle = title.trim();
+    if (!trimmedTitle) {
+      alert("تکایە ناونیشانەکێ بنڤیسە بۆ پڕۆژەی (Project name is required)");
+      return;
+    }
+
+    setEditorState(prev => ({ ...prev, isProcessing: true, statusMessage: '...پاشەکەوتکردن و بڵاوکردنەوە (Publishing & Resetting)...' }));
+
+    try {
+      // 1. Discard active objects
+      Object.values(canvasesRef.current).forEach(canvas => {
+        if (canvas) {
+          canvas.discardActiveObject();
+          canvas.renderAll();
+        }
+      });
+
+      const canvasData = Object.keys(canvasesRef.current).reduce((acc, pageNum) => {
+        const canvas = canvasesRef.current[Number(pageNum)];
+        if (canvas) {
+          acc[Number(pageNum)] = canvas.toJSON();
+        }
+        return acc;
+      }, {} as Record<number, any>);
+
+      const projectId = `proj-${Date.now()}`;
+      
+      // 2. Save project as a cloud project
+      await saveProjectToCloud(projectId, trimmedTitle, pages, canvasData);
+
+      // 3. Request public publish
+      await requestProjectPublish(projectId, auth.currentUser.displayName || "کۆدکار", auth.currentUser.email || "guest@kpdf.local");
+
+      // 4. Refresh projects lists
+      await loadAllCloudData();
+
+      alert("پڕۆژەکە بە سەرکەوتوویی پاشەکەوت کرا و نێردرا بۆ بەشی پەسەندکردنی ئەدمین! ئێستا پڕۆژەیەکی نوێ دەستپێدەکات. 🎉");
+
+      // 5. Start a completely new blank project!
+      handleStartNewProject();
+    } catch (err: any) {
+      console.error("Publish and reset failed:", err);
+      alert("شکستی هێنا لە بڵاوکردنەوە: " + err.message);
+    } finally {
+      setEditorState(prev => ({ ...prev, isProcessing: false, statusMessage: null }));
+    }
+  };
+
   const handleSaveProjectToCloud = async (customTitle?: string) => {
     if (!auth.currentUser) {
       alert("تکایە سەرەتا بچۆ ژوورەوە بۆ پاشەکەوتکردن ل سەر سحابێ");
@@ -2488,6 +2570,16 @@ const App: React.FC = () => {
           <span>پڕۆژێن گشتی</span>
         </button>
 
+        {/* Button 3: Publish and Start New */}
+        <button
+          onClick={handlePublishAndNewProject}
+          className="flex items-center gap-1.5 px-4 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl shadow-2xl transition-all active:scale-95 text-xs font-bold border border-blue-500/20 animate-pulse"
+          title="بڵاوکردنەوەی پڕۆژە و دەستپێکرنا پڕۆژەکێ نوو (Publish & New Project)"
+        >
+          <Icons.Send size={14} className="text-white" />
+          <span>بڵاوکردنەوە و نوێ</span>
+        </button>
+
         {/* Admin Pending Requests Notification */}
         {user && user.email === 'hussein.zebary.chemistry96@gmail.com' && (
           <button
@@ -2578,6 +2670,16 @@ const App: React.FC = () => {
                       <div className="text-center space-y-2 bg-zinc-900/40 p-4 rounded-xl border border-zinc-800/60">
                         <p className="text-xs text-zinc-400 leading-relaxed">
                           بۆ پاشەکەوتکرنا کارێن خۆ و پاراستنا وان ل سەر هەر ئامیرەکێ، بچۆ د ئەکاونتێ خۆ دا ب هەر شێوازەکێ دڤێت:
+                        </p>
+                      </div>
+
+                      {/* Deployment / Host Warning for Firebase Authorized Domains */}
+                      <div className="p-3 bg-amber-950/30 border border-amber-800/40 rounded-xl text-right space-y-1.5" dir="rtl">
+                        <p className="text-[11px] font-bold text-amber-400 flex items-center gap-1 justify-start">
+                          <span>⚠️ تێبینی گرنگ بۆ بڵاوکردنەوە (GitHub & Netlify)</span>
+                        </p>
+                        <p className="text-[10px] text-amber-200/90 leading-relaxed">
+                          ئەگەر دروستکردنی ئەکاونت یان چوونەژوورەوە کار نەکات لەسەر Netlify یان GitHub، پێویستە ناونیشانی مالپەڕی خۆت (بۆ نموونە <code className="bg-amber-900/40 px-1 py-0.5 rounded text-white font-mono text-[9px]">pdfhusseinn.netlify.app</code>) زیاد بکەیت لە لیستی <strong>Authorized Domains</strong> لە بەشی Authentication &gt; Settings لە ناو کۆنسۆلی Firebase Console. بەبێ ئەمە Firebase ڕێگە بە چوونەژوورەوە نادات.
                         </p>
                       </div>
 

@@ -66,10 +66,12 @@ import {
   Edit,
   Code,
   Check,
-  LineChart
+  LineChart,
+  Send
 } from 'lucide-react';
 
 export const Icons = {
+  Send: Send,
   LineChart: LineChart,
   Check: Check,
   Edit: Edit,
