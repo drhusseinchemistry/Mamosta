@@ -9,6 +9,8 @@ import { EditorState, PageData, ToolType } from './types';
 import { initializePDFJS, loadPDFDocument, renderPDFPageToDataURL } from './services/pdfService';
 import { transcribeAudio, performOCR, validateApiKey, lastValidationError, generateMathFromImage, checkServerConfig, troubleshootPage, troubleshootKpdfPage } from './services/geminiService';
 import { Icons } from './components/Icon';
+import { auth, signInWithGoogle, logOut, saveProjectToCloud, getCloudProjects, getCloudTemplates, deleteProjectFromCloud, CloudProject } from './services/firebaseService';
+import { onAuthStateChanged, User } from 'firebase/auth';
 
 interface CharStyle {
   fill?: string;
@@ -231,7 +233,17 @@ const App: React.FC = () => {
   const [iconSize, setIconSize] = useState<number>(18);
   const [appTheme, setAppTheme] = useState<string>('indigo'); // indigo, emerald, purple, gold, slate
   const [listMarkerStyle, setListMarkerStyle] = useState<string>('•'); // •, ●, ■, ★, ✔, -
-  const [settingsTab, setSettingsTab] = useState<'design' | 'ai'>('design');
+  const [settingsTab, setSettingsTab] = useState<'design' | 'ai' | 'cloud'>('design');
+
+  // Firebase State
+  const [user, setUser] = useState<User | null>(null);
+  const [cloudProjects, setCloudProjects] = useState<CloudProject[]>([]);
+  const [cloudTemplates, setCloudTemplates] = useState<CloudProject[]>([]);
+  const [saveTitle, setSaveTitle] = useState<string>('');
+
+  // Auto-Save Refs
+  const autoSaveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const isInitializingRef = useRef<boolean>(true);
 
   // Hidden inputs refs
   const ocrInputRef = useRef<HTMLInputElement>(null);
@@ -277,6 +289,7 @@ const App: React.FC = () => {
           history.undoStack.shift();
         }
         setForceUpdate(prev => prev + 1);
+        handleAutoSave();
       }
     } catch (e) {
       console.error("Error saving canvas state:", e);
@@ -351,6 +364,163 @@ const App: React.FC = () => {
     }
   };
 
+  // --- Auto-Save Functions ---
+  const handleAutoSave = () => {
+    if (isInitializingRef.current) return;
+    try {
+      const serializedCanvases = Object.keys(canvasesRef.current).reduce((acc, pageNum) => {
+        const canvas = canvasesRef.current[Number(pageNum)];
+        if (canvas) {
+          acc[Number(pageNum)] = canvas.toJSON();
+        }
+        return acc;
+      }, {} as Record<number, any>);
+
+      const draftState = {
+        pages,
+        canvases: serializedCanvases,
+        activePage,
+        appTheme,
+        iconSize,
+        listMarkerStyle,
+        timestamp: Date.now()
+      };
+      localStorage.setItem('kurdish_pdf_active_draft', JSON.stringify(draftState));
+    } catch (e) {
+      console.error("Local auto-save error:", e);
+    }
+
+    // Cloud auto-save if logged in (debounced)
+    if (auth.currentUser) {
+      if (autoSaveTimeoutRef.current) {
+        clearTimeout(autoSaveTimeoutRef.current);
+      }
+      autoSaveTimeoutRef.current = setTimeout(async () => {
+        const user = auth.currentUser;
+        if (!user) return;
+        try {
+          const serializedCanvases = Object.keys(canvasesRef.current).reduce((acc, pageNum) => {
+            const canvas = canvasesRef.current[Number(pageNum)];
+            if (canvas) {
+              acc[Number(pageNum)] = canvas.toJSON();
+            }
+            return acc;
+          }, {} as Record<number, any>);
+
+          const safePages = pages.map(p => ({
+            pageNumber: p.pageNumber,
+            viewport: { width: p.viewport.width, height: p.viewport.height },
+            image: p.image || ''
+          }));
+
+          await saveProjectToCloud(`draft-${user.uid}`, `ڕەشنووسی خۆکار (Auto Draft)`, safePages, serializedCanvases, false);
+          console.log("Cloud auto-saved draft successfully.");
+        } catch (e) {
+          console.error("Cloud auto-save error:", e);
+        }
+      }, 1500);
+    }
+  };
+
+  // Load draft from cloud or local storage
+  const loadDraft = async (currentUser: User | null) => {
+    isInitializingRef.current = true;
+    try {
+      if (currentUser) {
+        // Load cloud draft if exists
+        try {
+          const { doc, getDoc } = await import('firebase/firestore');
+          const { db } = await import('./services/firebaseService');
+          const draftRef = doc(db, 'projects', `draft-${currentUser.uid}`);
+          const draftSnap = await getDoc(draftRef);
+          if (draftSnap.exists()) {
+            const draftData = draftSnap.data();
+            if (draftData && draftData.pages && draftData.canvases) {
+              pendingCanvasesRef.current = draftData.canvases;
+              setPages(draftData.pages);
+              setActivePage(1);
+              isInitializingRef.current = false;
+              return;
+            }
+          }
+        } catch (cloudErr) {
+          console.error("Failed to fetch cloud draft, falling back:", cloudErr);
+        }
+      }
+
+      // Local storage fallback
+      const localDraftStr = localStorage.getItem('kurdish_pdf_active_draft');
+      if (localDraftStr) {
+        const localDraft = JSON.parse(localDraftStr);
+        if (localDraft && localDraft.pages && localDraft.canvases) {
+          pendingCanvasesRef.current = localDraft.canvases;
+          setPages(localDraft.pages);
+          if (localDraft.appTheme) setAppTheme(localDraft.appTheme);
+          if (localDraft.iconSize) setIconSize(Number(localDraft.iconSize));
+          if (localDraft.listMarkerStyle) setListMarkerStyle(localDraft.listMarkerStyle);
+          if (localDraft.activePage) setActivePage(localDraft.activePage);
+        }
+      }
+    } catch (e) {
+      console.error("Error loading draft:", e);
+    } finally {
+      isInitializingRef.current = false;
+    }
+  };
+
+  // Trigger auto-save when pages, activePage, etc change
+  useEffect(() => {
+    if (!isInitializingRef.current && pages.length > 0) {
+      handleAutoSave();
+    }
+  }, [pages, activePage, appTheme, iconSize, listMarkerStyle]);
+
+  // Initialize Firebase Auth & Sync
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+      setUser(currentUser);
+      if (currentUser) {
+        // Load cloud projects
+        try {
+          const projs = await getCloudProjects();
+          setCloudProjects(projs);
+        } catch (err) {
+          console.error("Failed to load cloud projects on login:", err);
+        }
+
+        // Load cloud templates
+        try {
+          const temps = await getCloudTemplates();
+          setCloudTemplates(temps || []);
+        } catch (err) {
+          console.error("Failed to load templates:", err);
+        }
+        
+        // Load settings from firestore
+        try {
+          const { doc, getDoc } = await import('firebase/firestore');
+          const { db } = await import('./services/firebaseService');
+          const settingsSnap = await getDoc(doc(db, 'users', currentUser.uid));
+          if (settingsSnap.exists()) {
+            const data = settingsSnap.data();
+            if (data.theme) setAppTheme(data.theme);
+            if (data.iconSize) setIconSize(Number(data.iconSize));
+            if (data.listMarker) setListMarkerStyle(data.listMarker);
+          }
+        } catch (err) {
+          console.error("Failed to load user settings:", err);
+        }
+      } else {
+        setCloudProjects([]);
+        setCloudTemplates([]);
+      }
+
+      // Load draft (local or cloud)
+      loadDraft(currentUser);
+    });
+    return () => unsubscribe();
+  }, []);
+
   // Initialize external libraries
   useEffect(() => {
     const loadLibs = async () => {
@@ -377,13 +547,30 @@ const App: React.FC = () => {
   }, []);
 
   // Save Settings handler
-  const saveCustomSettings = (newSize: number, newTheme: string, newMarker: string) => {
+  const saveCustomSettings = async (newSize: number, newTheme: string, newMarker: string) => {
     setIconSize(newSize);
     setAppTheme(newTheme);
     setListMarkerStyle(newMarker);
     localStorage.setItem('app_icon_size', String(newSize));
     localStorage.setItem('app_theme', newTheme);
     localStorage.setItem('app_list_marker', newMarker);
+
+    // Sync with Firestore if logged in
+    if (auth.currentUser) {
+      try {
+        const { doc, setDoc, serverTimestamp } = await import('firebase/firestore');
+        const { db } = await import('./services/firebaseService');
+        await setDoc(doc(db, 'users', auth.currentUser.uid), {
+          userId: auth.currentUser.uid,
+          theme: newTheme,
+          iconSize: newSize,
+          listMarker: newMarker,
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+      } catch (err) {
+        console.error("Failed to sync settings with Firestore:", err);
+      }
+    }
   };
 
   // --- API Key Management ---
@@ -1802,6 +1989,142 @@ const App: React.FC = () => {
     }
   };
 
+  const handleSaveProjectToCloud = async (customTitle?: string) => {
+    if (!auth.currentUser) {
+      alert("تکایە سەرەتا بچۆ ژوورەوە بۆ پاشەکەوتکردن ل سەر سحابێ");
+      return;
+    }
+    if (pages.length === 0) {
+      alert("هیچ لاپەڕەیەک نییە بۆ پاشەکەوتکردن");
+      return;
+    }
+
+    const title = (customTitle || saveTitle || `پڕۆژەی ${new Date().toLocaleDateString('ku-IQ')}`).trim();
+    if (!title) {
+      alert("تکایە ناونیشانەک بۆ پڕۆژەی بنووسە");
+      return;
+    }
+
+    setEditorState(prev => ({ ...prev, isProcessing: true, statusMessage: '...پاشەکەوتکردن ل سەر سحابێ (Saving to Cloud)' }));
+
+    try {
+      // Discard active objects
+      Object.values(canvasesRef.current).forEach(canvas => {
+        if (canvas) {
+          canvas.discardActiveObject();
+          canvas.renderAll();
+        }
+      });
+
+      const canvasData = Object.keys(canvasesRef.current).reduce((acc, pageNum) => {
+        const canvas = canvasesRef.current[Number(pageNum)];
+        if (canvas) {
+          acc[Number(pageNum)] = canvas.toJSON();
+        }
+        return acc;
+      }, {} as Record<number, any>);
+
+      const projectId = `proj-${Date.now()}`;
+      await saveProjectToCloud(projectId, title, pages, canvasData);
+      
+      // Refresh projects list
+      const updatedProjs = await getCloudProjects();
+      setCloudProjects(updatedProjs);
+      setSaveTitle('');
+      alert("پڕۆژە بە سەرکەوتوویی لەسەر سحاب پاشەکەوت کرا! 🎉");
+    } catch (err: any) {
+      console.error("Cloud save failed:", err);
+      alert("شکستی هێنا لە پاشەکەوتکردن لەسەر سحاب: " + err.message);
+    } finally {
+      setEditorState(prev => ({ ...prev, isProcessing: false, statusMessage: null }));
+    }
+  };
+
+  const handleLoadProjectFromCloud = (project: CloudProject) => {
+    setEditorState(prev => ({ ...prev, isProcessing: true, statusMessage: '...پڕۆژەی دەستکاریکراو باردەکرێت' }));
+    try {
+      if (project && project.pages && project.canvases) {
+        pendingCanvasesRef.current = project.canvases;
+        setPages(project.pages);
+        setActivePage(1);
+
+        // Check ownership
+        const isCurrentOwner = auth.currentUser && project.userId === auth.currentUser.uid;
+        if (isCurrentOwner) {
+          setSaveTitle(project.title);
+          alert(`پڕۆژەی "${project.title}" بە سەرکەوتوویی بارکرا! 🎉`);
+        } else {
+          // Loaded as template copy
+          const copyTitle = `${project.title} (کۆپی)`;
+          setSaveTitle(copyTitle);
+          alert(`پڕۆژەی نموونە "${project.title}" وەک کۆپی بارکرا! دەتونیت دەستکاری بکەیت و پاشەکەوتی بکەیت وەک پڕۆژەیەکی نوێ لە ئەکاونتی خۆتدا. 🎉`);
+        }
+      } else {
+        alert('کێشەیەک هەیە: پڕۆژەکە دروست نییە یان فایلەکە تێکچووە');
+      }
+    } catch (err: any) {
+      console.error(err);
+      alert('شکستی هێنا لە بارکردنی پڕۆژە: ' + err.message);
+    } finally {
+      setEditorState(prev => ({ ...prev, isProcessing: false, statusMessage: null }));
+    }
+  };
+
+  const handleTogglePublish = async (project: CloudProject) => {
+    if (!auth.currentUser) return;
+    const isCurrentlyPublished = project.isPublished === true;
+    const actionText = isCurrentlyPublished ? "لابردنی بڵاوکردنەوە" : "بڵاوکردنەوە بۆ هەمووان";
+    if (!window.confirm(`ئایا دڵنیایت دەتەوێت "${project.title}" ${actionText} بکەیت؟`)) {
+      return;
+    }
+
+    setEditorState(prev => ({ ...prev, isProcessing: true, statusMessage: '...نوێکردنەوەی دۆخی بڵاوکردنەوە' }));
+    try {
+      await saveProjectToCloud(project.id, project.title, project.pages, project.canvases, !isCurrentlyPublished);
+      
+      // Refresh list
+      const updatedProjs = await getCloudProjects();
+      setCloudProjects(updatedProjs);
+
+      const temps = await getCloudTemplates();
+      setCloudTemplates(temps || []);
+
+      alert(`دۆخی پڕۆژەکە بە سەرکەوتوویی نوێکرایەوە بۆ: ${!isCurrentlyPublished ? 'بڵاوکراوە وەک نموونەی گشتی' : 'تەنها تایبەت'}`);
+    } catch (err: any) {
+      console.error("Toggle publish failed:", err);
+      alert("شکست هێنا لە گۆڕینی دۆخی بڵاوکردنەوە: " + err.message);
+    } finally {
+      setEditorState(prev => ({ ...prev, isProcessing: false, statusMessage: null }));
+    }
+  };
+
+  const handleDeleteProjectFromCloud = async (projectId: string, title: string) => {
+    if (!auth.currentUser) return;
+    if (!window.confirm(`ئەرێ تو دڵنیایی دەتەوێت پڕۆژەی "${title}" بسڕیتەوە؟`)) {
+      return;
+    }
+
+    setEditorState(prev => ({ ...prev, isProcessing: true, statusMessage: '...سڕینەوەی پڕۆژە لەسەر سحاب' }));
+    try {
+      await deleteProjectFromCloud(projectId);
+      const updated = await getCloudProjects();
+      setCloudProjects(updated);
+      
+      // Also sync template list if admin deleted
+      if (auth.currentUser?.email === 'hussein.zebary.chemistry96@gmail.com') {
+        const temps = await getCloudTemplates();
+        setCloudTemplates(temps || []);
+      }
+      
+      alert("پڕۆژەکە بە سەرکەوتوویی سڕایەوە.");
+    } catch (err: any) {
+      console.error(err);
+      alert("sڕینەوەی پڕۆژە سەرکەوتوو نەبوو: " + err.message);
+    } finally {
+      setEditorState(prev => ({ ...prev, isProcessing: false, statusMessage: null }));
+    }
+  };
+
   const handleAddPage = () => {
     const width = 595;
     const height = 842;
@@ -1884,6 +2207,12 @@ const App: React.FC = () => {
                 className={`flex-1 py-2 rounded-md font-bold text-xs transition-all ${settingsTab === 'ai' ? 'bg-primary text-white shadow-md' : 'text-gray-400 hover:text-white hover:bg-white/5'}`}
               >
                 ژیریێ دەستکرد (AI Gemini)
+              </button>
+              <button 
+                onClick={() => setSettingsTab('cloud')}
+                className={`flex-1 py-2 rounded-md font-bold text-xs transition-all ${settingsTab === 'cloud' ? 'bg-primary text-white shadow-md' : 'text-gray-400 hover:text-white hover:bg-white/5'}`}
+              >
+                کۆگەیا سحابێ (Firebase Cloud)
               </button>
             </div>
 
@@ -1998,6 +2327,232 @@ const App: React.FC = () => {
                      </div>
                    )}
                 </div>
+              </div>
+            )}
+
+            {/* Tab 3: Firebase Cloud Settings */}
+            {settingsTab === 'cloud' && (
+              <div className="space-y-4 text-right animate-in fade-in duration-200" dir="rtl">
+                {!user ? (
+                  <div className="flex flex-col items-center justify-center p-6 text-center space-y-4 bg-black/25 rounded-xl border border-gray-800">
+                    <div className="p-3 bg-primary/10 rounded-full text-primary">
+                      <Icons.Globe size={32} />
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-bold text-white mb-1">پاشەکەوتکردنا پڕۆژان ل سەر سحابێ</h4>
+                      <p className="text-xs text-gray-400 max-w-sm leading-relaxed">
+                        بچۆ ژوورەوە ب ڕێیا ئەکاونتێ خۆ یێ گوگل بۆ هەڵگرتن، بارکرن، و کۆنترۆڵکرنا پڕۆژێن خۆ یێن PDF ب شێوازەکێ پاراستی و ئاسان ل سەر هەر ئامیرەکێ.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          await signInWithGoogle();
+                        } catch (err: any) {
+                          alert("شکست هێنا لە چوونەژوورەوە: " + err.message);
+                        }
+                      }}
+                      className="flex items-center gap-2 px-5 py-2.5 bg-white hover:bg-gray-100 text-black font-extrabold text-xs rounded-xl transition-all shadow-md cursor-pointer mx-auto"
+                    >
+                      <svg className="w-4 h-4" viewBox="0 0 24 24">
+                        <path
+                          fill="#4285F4"
+                          d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+                        />
+                        <path
+                          fill="#34A853"
+                          d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                        />
+                        <path
+                          fill="#FBBC05"
+                          d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"
+                        />
+                        <path
+                          fill="#EA4335"
+                          d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
+                        />
+                      </svg>
+                      <span>بچۆ ژوورەوە ب ڕێیا گوگل (Sign In)</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-4 animate-in fade-in duration-200">
+                    {/* User Card */}
+                    <div className="flex items-center justify-between p-3 bg-black/40 rounded-xl border border-gray-800">
+                      <div className="flex items-center gap-2.5 text-right">
+                        {user.photoURL ? (
+                          <img src={user.photoURL} alt={user.displayName || ''} className="w-9 h-9 rounded-full border border-gray-750" referrerPolicy="no-referrer" />
+                        ) : (
+                          <div className="w-9 h-9 rounded-full bg-primary/20 flex items-center justify-center text-primary font-bold text-sm">
+                            {user.displayName?.charAt(0) || user.email?.charAt(0) || 'U'}
+                          </div>
+                        )}
+                        <div>
+                          <p className="text-xs font-extrabold text-white">{user.displayName || 'بەکارهێنەری سحاب'}</p>
+                          <p className="text-[10px] text-gray-400">{user.email}</p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            await logOut();
+                          } catch (err: any) {
+                            alert("شکست هێنا لە چوونەدەرەوە: " + err.message);
+                          }
+                        }}
+                        className="px-3 py-1.5 bg-red-600/15 hover:bg-red-600/30 text-red-400 font-bold text-[10px] rounded-lg transition-all"
+                      >
+                        چوونەدەر (Logout)
+                      </button>
+                    </div>
+
+                    {/* Save Current Project Section */}
+                    <div className="p-3 bg-black/20 rounded-xl border border-gray-800 space-y-2">
+                      <label className="text-[10px] text-gray-400 font-extrabold uppercase tracking-wider block">
+                        پاشەکەوتکردنا پڕۆژێ نووکە ل سەر سحابێ (Save Current Project)
+                      </label>
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          value={saveTitle}
+                          onChange={(e) => setSaveTitle(e.target.value)}
+                          placeholder="ناونیشانێ پڕۆژەی بنووسە (بۆ نموونە: پڕۆژێ کیمیا)..."
+                          className="flex-1 bg-zinc-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-primary text-right"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => handleSaveProjectToCloud()}
+                          className="px-4 py-2 bg-primary hover:opacity-90 text-white rounded-lg font-bold text-xs flex items-center gap-1.5 transition-opacity"
+                        >
+                          <Icons.Save size={14} />
+                          <span>پاشەکەوتکرن</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Cloud Projects List */}
+                    <div className="space-y-2 text-right">
+                      <h4 className="text-[10px] text-gray-400 font-extrabold uppercase tracking-wider block">
+                        پڕۆژێن بارکری ل سەر سحابێ ({cloudProjects.length})
+                      </h4>
+                      
+                      <div className="max-h-[180px] overflow-y-auto space-y-1.5 pr-0.5">
+                        {cloudProjects.length === 0 ? (
+                          <p className="text-[11px] text-gray-500 py-6 text-center border border-dashed border-gray-800 rounded-lg">
+                            چ پڕۆژە نینن ل سەر سحابێ. پڕۆژەکێ نوکە پاشەکەوت بکە!
+                          </p>
+                        ) : (
+                          cloudProjects.map((proj) => {
+                            const updatedDate = proj.updatedAt?.seconds 
+                              ? new Date(proj.updatedAt.seconds * 1000).toLocaleString('ku-IQ', { dateStyle: 'short', timeStyle: 'short' })
+                              : new Date().toLocaleString('ku-IQ', { dateStyle: 'short', timeStyle: 'short' });
+                            return (
+                              <div
+                                key={proj.id}
+                                className="flex items-center justify-between p-2.5 bg-zinc-900/60 hover:bg-zinc-900 border border-gray-800 hover:border-gray-750 rounded-lg transition-all text-right"
+                              >
+                                <div className="flex-1 min-w-0 pr-2">
+                                  <p className="text-xs font-bold text-white truncate flex items-center justify-end gap-1">
+                                    {proj.isPublished && (
+                                      <span className="px-1.5 py-0.5 bg-indigo-500/15 text-indigo-400 text-[9px] rounded font-extrabold">بڵاوکراوە</span>
+                                    )}
+                                    {proj.title}
+                                  </p>
+                                  <div className="flex gap-2 text-[10px] text-gray-400 mt-0.5">
+                                    <span>{proj.pages?.length || 0} لاپەڕە</span>
+                                    <span>•</span>
+                                    <span>{updatedDate}</span>
+                                  </div>
+                                </div>
+                                
+                                <div className="flex gap-1.5 shrink-0">
+                                  {user && user.email === 'hussein.zebary.chemistry96@gmail.com' && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleTogglePublish(proj)}
+                                      className={`p-1 rounded-md transition-all ${proj.isPublished ? 'bg-indigo-600/25 hover:bg-indigo-600/40 text-indigo-400' : 'bg-gray-700/20 hover:bg-gray-750 text-gray-400'}`}
+                                      title={proj.isPublished ? "لابردنی بڵاوکردنەوە" : "بڵاوکردنەوە بۆ هەمووان"}
+                                    >
+                                      <Icons.Globe size={12} />
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={() => handleLoadProjectFromCloud(proj)}
+                                    className="px-2.5 py-1 bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-400 font-extrabold text-[10px] rounded-md transition-all flex items-center gap-1"
+                                  >
+                                    <Icons.Upload size={10} />
+                                    <span>بارکرن</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteProjectFromCloud(proj.id, proj.title)}
+                                    className="p-1 bg-red-600/10 hover:bg-red-600/30 text-red-400 rounded-md transition-all"
+                                    title="Delete from Cloud"
+                                  >
+                                    <Icons.Trash size={12} />
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Published Admin Templates Section */}
+                    <div className="space-y-2 text-right mt-4 border-t border-gray-800 pt-4">
+                      <h4 className="text-[10px] text-gray-400 font-extrabold uppercase tracking-wider block">
+                        پڕۆژێن بەڵاڤکراو یێن ئەدمینی ({cloudTemplates.length})
+                      </h4>
+                      
+                      <div className="max-h-[180px] overflow-y-auto space-y-1.5 pr-0.5">
+                        {cloudTemplates.length === 0 ? (
+                          <p className="text-[11px] text-gray-500 py-4 text-center border border-dashed border-gray-800 rounded-lg">
+                            هیچ پڕۆژەیەکی بەڵاڤکراو بەردەست نییە نوکە.
+                          </p>
+                        ) : (
+                          cloudTemplates.map((proj) => {
+                            const updatedDate = proj.updatedAt?.seconds 
+                              ? new Date(proj.updatedAt.seconds * 1000).toLocaleString('ku-IQ', { dateStyle: 'short', timeStyle: 'short' })
+                              : new Date().toLocaleString('ku-IQ', { dateStyle: 'short', timeStyle: 'short' });
+                            return (
+                              <div
+                                key={proj.id}
+                                className="flex items-center justify-between p-2.5 bg-indigo-950/20 hover:bg-indigo-950/35 border border-indigo-900/40 rounded-lg transition-all text-right"
+                              >
+                                <div className="flex-1 min-w-0 pr-2">
+                                  <p className="text-xs font-bold text-white truncate flex items-center justify-end gap-1">
+                                    <span className="px-1.5 py-0.5 bg-indigo-500/10 text-indigo-300 text-[9px] rounded font-extrabold">نموونەی گشتی</span>
+                                    {proj.title}
+                                  </p>
+                                  <div className="flex gap-2 text-[10px] text-gray-400 mt-0.5">
+                                    <span>{proj.pages?.length || 0} لاپەڕە</span>
+                                    <span>•</span>
+                                    <span>{updatedDate}</span>
+                                  </div>
+                                </div>
+                                
+                                <div className="flex gap-1.5 shrink-0">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleLoadProjectFromCloud(proj)}
+                                    className="px-2.5 py-1 bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-400 font-extrabold text-[10px] rounded-md transition-all flex items-center gap-1"
+                                  >
+                                    <Icons.Copy size={10} />
+                                    <span>بارکرن و کۆپی</span>
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 

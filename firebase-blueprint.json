@@ -1,0 +1,52 @@
+{
+  "entities": {
+    "Project": {
+      "title": "Kurdish PDF Cloud Project",
+      "description": "A saved vector/PDF project with canvas elements, equations, and page details.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "userId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "pages": {
+          "type": "array",
+          "description": "List of pages with their viewports and images"
+        },
+        "canvases": {
+          "type": "object",
+          "description": "Serialized fabric.js canvas objects mapped by page number"
+        },
+        "isPublished": {
+          "type": "boolean",
+          "description": "Whether this project is published as a template/public project by the admin."
+        }
+      },
+      "required": ["title", "userId", "pages", "canvases", "createdAt", "updatedAt"]
+    },
+    "UserSettings": {
+      "title": "User Preferences",
+      "description": "User specific app configuration like UI theme, list marker, and icon size.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "theme": { "type": "string" },
+        "iconSize": { "type": "integer" },
+        "listMarker": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "theme", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/projects/{projectId}": {
+      "schema": "Project",
+      "description": "User-authored cloud projects containing PDF sheets and edited vector canvases."
+    },
+    "/users/{userId}": {
+      "schema": "UserSettings",
+      "description": "User preferences and system-wide options."
+    }
+  }
+}

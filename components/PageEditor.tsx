@@ -1226,9 +1226,28 @@ const PageEditor: React.FC<PageEditorProps> = ({
     }
   };
 
+  const getActiveEquations = (): any[] => {
+    if (graphEquations && graphEquations.length > 0) {
+      return graphEquations;
+    }
+    return [
+      {
+        id: 'eq-1',
+        freeFormEq: graphFreeFormEq || 'y = 1x',
+        type: graphType === 'points' ? 'linear' : graphType,
+        linearEq: { m: graphLinearM, c: graphLinearC },
+        quadEq: { a: graphQuadA, b: graphQuadB, c: graphQuadC },
+        lineColor: graphLineColor,
+        lineThickness: graphLineThickness,
+        lineStyle: graphLineStyle
+      }
+    ];
+  };
+
   const handleAddEquation = () => {
+    const activeEqs = getActiveEquations();
     const colors = ['#06b6d4', '#ec4899', '#3b82f6', '#10b981', '#f59e0b', '#ef4444'];
-    const nextColor = colors[graphEquations.length % colors.length];
+    const nextColor = colors[activeEqs.length % colors.length];
     const newEq = {
       id: `eq-${Date.now()}`,
       freeFormEq: 'y = 2x',
@@ -1239,18 +1258,20 @@ const PageEditor: React.FC<PageEditorProps> = ({
       lineThickness: 3,
       lineStyle: 'solid' as const
     };
-    const updated = [...graphEquations, newEq];
+    const updated = [...activeEqs, newEq];
     handleUpdateGraphItem({ equations: updated });
   };
 
   const handleRemoveEquation = (id: string) => {
-    if (graphEquations.length <= 1) return;
-    const updated = graphEquations.filter(e => e.id !== id);
+    const activeEqs = getActiveEquations();
+    if (activeEqs.length <= 1) return;
+    const updated = activeEqs.filter(e => e.id !== id);
     handleUpdateGraphItem({ equations: updated });
   };
 
   const handleUpdateEquation = (id: string, fields: Partial<any>) => {
-    const updated = graphEquations.map(e => {
+    const activeEqs = getActiveEquations();
+    const updated = activeEqs.map(e => {
       if (e.id === id) {
         const merged = { ...e, ...fields };
         if (fields.freeFormEq !== undefined) {
@@ -1983,6 +2004,7 @@ const PageEditor: React.FC<PageEditorProps> = ({
     canvas.on('object:scaling', handleObjectScaling);
     canvas.on('object:removed', onModified);
     canvas.on('path:created', onModified);
+    canvas.on('text:changed', onModified);
 
     // Handle double click on any object to enter editing mode immediately, or on background to zoom
     canvas.on('mouse:dblclick', (opt: any) => {
@@ -4026,19 +4048,9 @@ const PageEditor: React.FC<PageEditorProps> = ({
               <div className="flex flex-col gap-3">
                 {/* Equation List */}
                 <div className="flex flex-col gap-2.5">
-                  {(graphEquations && graphEquations.length > 0 ? graphEquations : [
-                    {
-                      id: 'eq-1',
-                      freeFormEq: graphFreeFormEq,
-                      type: graphType,
-                      linearEq: { m: graphLinearM, c: graphLinearC },
-                      quadEq: { a: graphQuadA, b: graphQuadB, c: graphQuadC },
-                      lineColor: graphLineColor,
-                      lineThickness: graphLineThickness,
-                      lineStyle: graphLineStyle
-                    }
-                  ]).map((eq, index) => {
+                  {getActiveEquations().map((eq, index) => {
                     const isLinear = eq.type === 'linear';
+                    const activeEqs = getActiveEquations();
                     return (
                       <div 
                         key={eq.id} 
@@ -4050,7 +4062,7 @@ const PageEditor: React.FC<PageEditorProps> = ({
                             هاوکێشە {index + 1} ({isLinear ? 'هێڵی - Linear' : 'کەوانەیی - Quad'})
                           </span>
                           
-                          {graphEquations.length > 1 && (
+                          {activeEqs.length > 1 && (
                             <button
                               type="button"
                               onClick={() => handleRemoveEquation(eq.id)}
