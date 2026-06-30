@@ -23,9 +23,17 @@ import {
   requestProjectPublish, 
   approveProjectPublish, 
   getPendingProjects, 
-  CloudProject 
+  CloudProject,
+  getGoogleAccessToken,
+  setGoogleAccessToken
 } from './services/firebaseService';
 import { onAuthStateChanged, User } from 'firebase/auth';
+import { 
+  listDriveFiles, 
+  downloadDriveFile, 
+  uploadDriveFile, 
+  DriveFile 
+} from './services/googleDriveService';
 
 interface CharStyle {
   fill?: string;
@@ -258,6 +266,7 @@ const App: React.FC = () => {
 
   // Projects Modal and Custom Authentication State
   const [showProjectsModal, setShowProjectsModal] = useState<boolean>(false);
+  const [showTopRightMenu, setShowTopRightMenu] = useState<boolean>(false);
   const [projectsTab, setProjectsTab] = useState<'my' | 'public' | 'pending'>('my');
   const [pendingProjects, setPendingProjects] = useState<CloudProject[]>([]);
   const [cloudError, setCloudError] = useState<string | null>(null);
@@ -266,6 +275,16 @@ const App: React.FC = () => {
   const [authPassword, setAuthPassword] = useState<string>('');
   const [authDisplayName, setAuthDisplayName] = useState<string>('');
   const [authIsSignUp, setAuthIsSignUp] = useState<boolean>(false);
+
+  // Google Drive State Variables
+  const [showDriveModal, setShowDriveModal] = useState<boolean>(false);
+  const [driveFiles, setDriveFiles] = useState<DriveFile[]>([]);
+  const [isDriveLoading, setIsDriveLoading] = useState<boolean>(false);
+  const [driveSearch, setDriveSearch] = useState<string>('');
+  const [driveError, setDriveError] = useState<string | null>(null);
+  const [isSavingToDrive, setIsSavingToDrive] = useState<boolean>(false);
+  const [saveDriveFilename, setSaveDriveFilename] = useState<string>('');
+  const [saveDriveType, setSaveDriveType] = useState<'pdf' | 'kpdf'>('pdf');
 
   // Auto-Save Refs
   const autoSaveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -562,6 +581,7 @@ const App: React.FC = () => {
         setCloudProjects([]);
         setCloudTemplates([]);
         setPendingProjects([]);
+        setGoogleAccessToken(null);
       }
 
       // Load draft (local or cloud)
@@ -1934,6 +1954,12 @@ const App: React.FC = () => {
 
           doc.save("edited-document.pdf");
 
+          // Auto upload to Google Drive if connected
+          const pdfArrayBuffer = doc.output('arraybuffer');
+          const pdfBlob = new Blob([pdfArrayBuffer], { type: 'application/pdf' });
+          const filename = (saveTitle || "edited-document") + ".pdf";
+          await autoUploadToDriveIfConnected(pdfBlob, filename, 'application/pdf');
+
       } catch (e) {
           console.error(e);
           alert("Error exporting PDF");
@@ -1986,6 +2012,12 @@ const App: React.FC = () => {
 
           doc.save("edited-document-full-quality.pdf");
 
+          // Auto upload to Google Drive if connected
+          const pdfArrayBuffer = doc.output('arraybuffer');
+          const pdfBlob = new Blob([pdfArrayBuffer], { type: 'application/pdf' });
+          const filename = (saveTitle || "edited-document-full-quality") + ".pdf";
+          await autoUploadToDriveIfConnected(pdfBlob, filename, 'application/pdf');
+
       } catch (e) {
           console.error(e);
           alert("کێشەیەک لە دروستکردنی PDF دروست بوو");
@@ -1994,7 +2026,7 @@ const App: React.FC = () => {
       }
   };
 
-  const handleSaveProject = () => {
+  const handleSaveProject = async () => {
     if (pages.length === 0) {
       alert("هیچ لاپەڕەیەک نییە بۆ پاشەکەوتکردن");
       return;
@@ -2030,6 +2062,10 @@ const App: React.FC = () => {
       a.download = "edited-project.kpdf";
       a.click();
       URL.revokeObjectURL(url);
+
+      // Auto upload to Google Drive if connected
+      const filename = (saveTitle || "edited-project") + ".kpdf";
+      await autoUploadToDriveIfConnected(blob, filename, 'application/json');
     } catch (err: any) {
       console.error(err);
       alert("شکستی هێنا لە پاشەکەوتکردنی پڕۆژە: " + err.message);
@@ -2137,6 +2173,16 @@ const App: React.FC = () => {
       // 2. Save project as a cloud project
       await saveProjectToCloud(projectId, trimmedTitle, pages, canvasData);
 
+      // Auto upload to Google Drive if connected
+      const projectDataForDrive = {
+        version: "1.0",
+        pages: pages,
+        canvases: canvasData
+      };
+      const blob = new Blob([JSON.stringify(projectDataForDrive)], { type: 'application/json' });
+      const driveFilename = trimmedTitle + ".kpdf";
+      await autoUploadToDriveIfConnected(blob, driveFilename, 'application/json');
+
       // 3. Request public publish
       await requestProjectPublish(projectId, auth.currentUser.displayName || "کۆدکار", auth.currentUser.email || "guest@kpdf.local");
 
@@ -2193,6 +2239,16 @@ const App: React.FC = () => {
       const projectId = `proj-${Date.now()}`;
       await saveProjectToCloud(projectId, title, pages, canvasData);
       
+      // Auto upload to Google Drive if connected
+      const projectDataForDrive = {
+        version: "1.0",
+        pages: pages,
+        canvases: canvasData
+      };
+      const blob = new Blob([JSON.stringify(projectDataForDrive)], { type: 'application/json' });
+      const driveFilename = title + ".kpdf";
+      await autoUploadToDriveIfConnected(blob, driveFilename, 'application/json');
+
       // Refresh projects list
       const updatedProjs = await getCloudProjects();
       setCloudProjects(updatedProjs);
@@ -2233,6 +2289,208 @@ const App: React.FC = () => {
       alert('شکستی هێنا لە بارکردنی پڕۆژە: ' + err.message);
     } finally {
       setEditorState(prev => ({ ...prev, isProcessing: false, statusMessage: null }));
+    }
+  };
+
+  const handleConnectDrive = async () => {
+    setIsDriveLoading(true);
+    setDriveError(null);
+    try {
+      const user = await signInWithGoogle();
+      const token = getGoogleAccessToken();
+      if (token) {
+        await handleLoadDriveFiles(token);
+      } else {
+        setDriveError("پەیوەندیکردن بە گووگڵ درایڤ سەرکەوتوو نەبوو.");
+      }
+    } catch (err: any) {
+      console.error("Error connecting to Google Drive:", err);
+      setDriveError("کێشەیەک لە پەیوەستبوون بە گووگڵ درایڤ دروست بوو: " + (err?.message || err));
+    } finally {
+      setIsDriveLoading(false);
+    }
+  };
+
+  const handleLoadDriveFiles = async (token: string, searchName?: string) => {
+    setIsDriveLoading(true);
+    setDriveError(null);
+    try {
+      const files = await listDriveFiles(token, searchName);
+      setDriveFiles(files);
+    } catch (err: any) {
+      console.error("Error listing Drive files:", err);
+      setDriveError("شکستی هێنا لە بارکردنی فایلەکان: " + (err?.message || err));
+    } finally {
+      setIsDriveLoading(false);
+    }
+  };
+
+  const handleOpenDriveFile = async (file: DriveFile) => {
+    const token = getGoogleAccessToken();
+    if (!token) return;
+
+    const confirmOpen = window.confirm(`تۆ دڵنیای دەتەوێت فایلی "${file.name}" بکەیتەوە؟ پڕۆژەی ئێستات دادەخرێت.`);
+    if (!confirmOpen) return;
+
+    setEditorState(prev => ({ ...prev, isProcessing: true, statusMessage: '...داگرتنی فایل لە گووگڵ درایڤ' }));
+    try {
+      const blob = await downloadDriveFile(token, file.id);
+      
+      if (file.name.endsWith('.kpdf') || file.name.endsWith('.json') || file.mimeType === 'application/json') {
+        const text = await blob.text();
+        const project = JSON.parse(text);
+        if (project && project.pages && project.canvases) {
+          pendingCanvasesRef.current = project.canvases;
+          setPages(project.pages);
+          setActivePage(1);
+          setSaveTitle(file.name.replace(/\.(kpdf|json)$/i, ''));
+          setShowDriveModal(false);
+        } else {
+          alert('کێشەیەک هەیە: پڕۆژەکە دروست نییە یان فایلەکە تێکچووە');
+        }
+      } else {
+        const arrayBuffer = await blob.arrayBuffer();
+        const pdfDoc = await loadPDFDocument(arrayBuffer);
+        pdfDocRef.current = pdfDoc;
+        
+        const numPages = pdfDoc.numPages;
+        const newPages: PageData[] = [];
+
+        for (let i = 1; i <= numPages; i++) {
+          const { dataUrl, viewport } = await renderPDFPageToDataURL(pdfDoc, i);
+          newPages.push({
+            pageNumber: i,
+            viewport,
+            image: dataUrl
+          });
+        }
+
+        setPages(newPages);
+        setActivePage(1);
+        setSaveTitle(file.name.replace(/\.pdf$/i, ''));
+        setShowDriveModal(false);
+      }
+    } catch (err: any) {
+      console.error("Error opening Drive file:", err);
+      alert("شکستی هێنا لە چوونەناوەوەی فایلەکە: " + err.message);
+    } finally {
+      setEditorState(prev => ({ ...prev, isProcessing: false, statusMessage: null }));
+    }
+  };
+
+  const handleSaveToDrive = async (filename: string, fileType: 'pdf' | 'kpdf') => {
+    const token = getGoogleAccessToken();
+    if (!token) {
+      alert("تکایە سەرەتا پەیوەست ببن بە گووگڵ درایڤ.");
+      return;
+    }
+
+    if (!filename.trim()) {
+      alert("تکایە ناوێک بۆ فایلەکە دابنێ.");
+      return;
+    }
+
+    const confirmSave = window.confirm(`تۆ دڵنیای دەتەوێت فایلی "${filename}" پاشەکەوت بکەیت لە گووگڵ درایڤ؟`);
+    if (!confirmSave) return;
+
+    setIsSavingToDrive(true);
+    try {
+      let blob: Blob;
+      let mimeType: string;
+      let finalFilename = filename;
+
+      if (fileType === 'pdf') {
+        if (!window.jspdf) {
+          throw new Error("JSPDF library not loaded");
+        }
+        if (!finalFilename.toLowerCase().endsWith('.pdf')) {
+          finalFilename += '.pdf';
+        }
+        mimeType = 'application/pdf';
+
+        const { jsPDF } = window.jspdf;
+        const firstPage = pages[0];
+        const orientation = firstPage && firstPage.viewport.width > firstPage.viewport.height ? 'l' : 'p';
+        
+        const doc = new jsPDF({
+          orientation: orientation,
+          unit: 'px',
+          format: [firstPage.viewport.width, firstPage.viewport.height]
+        });
+
+        for (let i = 0; i < pages.length; i++) {
+          const page = pages[i];
+          const canvas = canvasesRef.current[page.pageNumber];
+          
+          if (!canvas) continue;
+
+          canvas.discardActiveObject();
+          canvas.renderAll();
+
+          const dataURL = canvas.toDataURL({
+            format: 'jpeg',
+            quality: 0.8,
+            multiplier: 1 
+          });
+
+          if (i > 0) {
+            doc.addPage([page.viewport.width, page.viewport.height]);
+          }
+          
+          doc.addImage(dataURL, 'JPEG', 0, 0, page.viewport.width, page.viewport.height);
+        }
+
+        const pdfArrayBuffer = doc.output('arraybuffer');
+        blob = new Blob([pdfArrayBuffer], { type: 'application/pdf' });
+
+      } else {
+        if (!finalFilename.toLowerCase().endsWith('.kpdf')) {
+          finalFilename += '.kpdf';
+        }
+        mimeType = 'application/json';
+
+        Object.values(canvasesRef.current).forEach(canvas => {
+          if (canvas) {
+            canvas.discardActiveObject();
+            canvas.renderAll();
+          }
+        });
+
+        const projectData = {
+          version: "1.0",
+          pages: pages,
+          canvases: Object.keys(canvasesRef.current).reduce((acc, pageNum) => {
+            const canvas = canvasesRef.current[Number(pageNum)];
+            if (canvas) {
+              acc[Number(pageNum)] = canvas.toJSON();
+            }
+            return acc;
+          }, {} as Record<number, any>)
+        };
+
+        blob = new Blob([JSON.stringify(projectData)], { type: 'application/json' });
+      }
+
+      await uploadDriveFile(token, finalFilename, mimeType, blob);
+      alert(`سەرکەوتووانە فایلی "${finalFilename}" پاشەکەوتکرا لە گووگڵ درایڤ!`);
+      await handleLoadDriveFiles(token);
+    } catch (err: any) {
+      console.error("Error saving to Drive:", err);
+      alert("شکستی هێنا لە پاشەکەوتکردنی فایلەکە: " + err.message);
+    } finally {
+      setIsSavingToDrive(false);
+    }
+  };
+
+  const autoUploadToDriveIfConnected = async (blob: Blob, name: string, mimeType: string) => {
+    const token = getGoogleAccessToken();
+    if (!token) return;
+    
+    try {
+      await uploadDriveFile(token, name, mimeType, blob);
+      console.log(`Auto-uploaded "${name}" to Google Drive successfully!`);
+    } catch (err: any) {
+      console.error(`Failed to auto-upload "${name}" to Google Drive:`, err);
     }
   };
 
@@ -2575,65 +2833,136 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* Floating Top Right Projects Toggles */}
-      <div className="fixed top-4 right-4 z-[90] flex gap-2" dir="rtl">
-        {/* Button 1: My Projects */}
+      {/* Floating Top Right Unified Projects & Account Menu */}
+      <div className="fixed top-4 right-4 z-[100] flex flex-col gap-1 items-end" dir="rtl">
         <button
-          onClick={() => {
-            setProjectsTab('my');
-            setShowProjectsModal(true);
-            loadAllCloudData();
-          }}
-          className="flex items-center gap-1.5 px-4 py-2.5 bg-zinc-950/90 hover:bg-zinc-900 text-white border border-zinc-800 rounded-xl shadow-2xl backdrop-blur-md transition-all active:scale-95 text-xs font-bold"
-          title="پڕۆژێن من (My Projects)"
+          onClick={() => setShowTopRightMenu(!showTopRightMenu)}
+          className="flex items-center gap-2 px-4 py-2.5 bg-zinc-950/95 border border-zinc-800 text-white rounded-xl shadow-2xl backdrop-blur-md transition-all active:scale-95 text-xs font-black hover:border-zinc-700 hover:bg-zinc-900"
+          title="مینیویا کارۆبارێن پڕۆژەی (Projects Menu)"
         >
-          <Icons.File size={14} className="text-blue-400" />
-          <span>پڕۆژێن من</span>
+          <Icons.Menu size={16} className="text-indigo-400" />
+          <span>کۆنترۆلا پڕۆژان (مینیو)</span>
+          <Icons.ChevronDown size={14} className={`text-zinc-500 transition-transform duration-200 ${showTopRightMenu ? 'rotate-180' : ''}`} />
         </button>
 
-        {/* Button 2: Public Projects */}
-        <button
-          onClick={() => {
-            setProjectsTab('public');
-            setShowProjectsModal(true);
-            loadAllCloudData();
-          }}
-          className="flex items-center gap-1.5 px-4 py-2.5 bg-zinc-950/90 hover:bg-zinc-900 text-white border border-zinc-800 rounded-xl shadow-2xl backdrop-blur-md transition-all active:scale-95 text-xs font-bold"
-          title="پڕۆژێن گشتی (Public Projects)"
-        >
-          <Icons.Globe size={14} className="text-emerald-400 animate-pulse" />
-          <span>پڕۆژێن گشتی</span>
-        </button>
+        {showTopRightMenu && (
+          <div className="mt-1 bg-zinc-950/95 border border-zinc-800 rounded-2xl p-2 w-64 shadow-2xl backdrop-blur-lg flex flex-col gap-1 animate-in slide-in-from-top-2 duration-150 z-[101]">
+            <span className="px-3 py-1.5 text-[10px] text-zinc-500 font-bold border-b border-zinc-900 text-right">ئۆپشنێن سەرەکی یێن پڕۆژان</span>
+            
+            {/* Button 1: My Projects */}
+            <button
+              onClick={() => {
+                setProjectsTab('my');
+                setShowProjectsModal(true);
+                setShowTopRightMenu(false);
+                loadAllCloudData();
+              }}
+              className="flex items-center gap-3 px-3 py-2.5 hover:bg-zinc-900 text-zinc-200 hover:text-white rounded-xl transition-all text-xs font-bold text-right w-full"
+            >
+              <div className="w-7 h-7 bg-blue-500/15 text-blue-400 rounded-lg flex items-center justify-center">
+                <Icons.File size={15} />
+              </div>
+              <div className="flex flex-col items-start">
+                <span>پڕۆژێن من</span>
+                <span className="text-[9px] text-zinc-500 font-normal">پڕۆژێن تە ل سەر سحابێ</span>
+              </div>
+            </button>
 
-        {/* Button 3: Publish and Start New */}
-        <button
-          onClick={handlePublishAndNewProject}
-          className="flex items-center gap-1.5 px-4 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl shadow-2xl transition-all active:scale-95 text-xs font-bold border border-blue-500/20 animate-pulse"
-          title="بڵاوکردنەوەی پڕۆژە و دەستپێکرنا پڕۆژەکێ نوو (Publish & New Project)"
-        >
-          <Icons.Send size={14} className="text-white" />
-          <span>بڵاوکردنەوە و نوێ</span>
-        </button>
+            {/* Button 2: Public Projects */}
+            <button
+              onClick={() => {
+                setProjectsTab('public');
+                setShowProjectsModal(true);
+                setShowTopRightMenu(false);
+                loadAllCloudData();
+              }}
+              className="flex items-center gap-3 px-3 py-2.5 hover:bg-zinc-900 text-zinc-200 hover:text-white rounded-xl transition-all text-xs font-bold text-right w-full"
+            >
+              <div className="w-7 h-7 bg-emerald-500/15 text-emerald-400 rounded-lg flex items-center justify-center">
+                <Icons.Globe size={15} />
+              </div>
+              <div className="flex flex-col items-start">
+                <span>پڕۆژێن گشتی</span>
+                <span className="text-[9px] text-zinc-500 font-normal">پڕۆژێن بەڵاڤکری بۆ هەمووان</span>
+              </div>
+            </button>
 
-        {/* Admin Pending Requests Notification */}
-        {user && user.email === 'hussein.zebary.chemistry96@gmail.com' && (
-          <button
-            onClick={() => {
-              setProjectsTab('pending');
-              setShowProjectsModal(true);
-              loadAllCloudData();
-            }}
-            className="flex items-center gap-1.5 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl shadow-2xl transition-all active:scale-95 text-xs font-bold relative border border-indigo-500/20"
-            title="پڕۆژێن ل چاوەڕوانیێ (Pending Requests)"
-          >
-            <Icons.Settings size={14} className="animate-spin duration-1000" />
-            <span>داواکاری</span>
-            {pendingProjects.length > 0 && (
-              <span className="absolute -top-1.5 -left-1.5 w-5 h-5 bg-red-500 text-white rounded-full text-[10px] flex items-center justify-center font-bold border-2 border-zinc-950 animate-bounce">
-                {pendingProjects.length}
-              </span>
+            {/* Button 3: Google Drive */}
+            <button
+              onClick={() => {
+                setShowDriveModal(true);
+                setShowTopRightMenu(false);
+                const token = getGoogleAccessToken();
+                if (token) {
+                  handleLoadDriveFiles(token);
+                }
+              }}
+              className="flex items-center gap-3 px-3 py-2.5 hover:bg-zinc-900 text-zinc-200 hover:text-white rounded-xl transition-all text-xs font-bold text-right w-full"
+            >
+              <div className="w-7 h-7 bg-amber-500/15 text-amber-500 rounded-lg flex items-center justify-center">
+                <Icons.Drive size={15} />
+              </div>
+              <div className="flex flex-col items-start">
+                <span>گووگڵ درایڤ</span>
+                <span className="text-[9px] text-zinc-500 font-normal">هەناردە و هاوردەکردنا درایڤ</span>
+              </div>
+            </button>
+
+            {/* Button 4: Publish & Start New */}
+            <button
+              onClick={() => {
+                setShowTopRightMenu(false);
+                handlePublishAndNewProject();
+              }}
+              className="flex items-center gap-3 px-3 py-2.5 hover:bg-zinc-900 text-zinc-200 hover:text-white rounded-xl transition-all text-xs font-bold text-right w-full"
+            >
+              <div className="w-7 h-7 bg-indigo-500/15 text-indigo-400 rounded-lg flex items-center justify-center">
+                <Icons.Send size={15} />
+              </div>
+              <div className="flex flex-col items-start">
+                <span>بڵاوکردنەوە و نوێ</span>
+                <span className="text-[9px] text-zinc-500 font-normal">پاشەکەوتکرن و بەڵاڤکرنا فەرمی</span>
+              </div>
+            </button>
+
+            {/* Admin Pending Requests Notification */}
+            {user && user.email === 'hussein.zebary.chemistry96@gmail.com' && (
+              <button
+                onClick={() => {
+                  setProjectsTab('pending');
+                  setShowProjectsModal(true);
+                  setShowTopRightMenu(false);
+                  loadAllCloudData();
+                }}
+                className="flex items-center gap-3 px-3 py-2.5 hover:bg-zinc-900 text-zinc-200 hover:text-white rounded-xl transition-all text-xs font-bold text-right w-full border-t border-zinc-900 mt-1 relative"
+              >
+                <div className="w-7 h-7 bg-rose-500/15 text-rose-400 rounded-lg flex items-center justify-center">
+                  <Icons.Settings size={15} className="animate-spin duration-1000" />
+                </div>
+                <div className="flex flex-col items-start">
+                  <span>داواکاری (Admin)</span>
+                  <span className="text-[9px] text-zinc-500 font-normal">پەسەندکرنا پڕۆژەیان</span>
+                </div>
+                {pendingProjects.length > 0 && (
+                  <span className="absolute left-3 top-4 w-5 h-5 bg-red-500 text-white rounded-full text-[10px] flex items-center justify-center font-bold animate-bounce">
+                    {pendingProjects.length}
+                  </span>
+                )}
+              </button>
             )}
-          </button>
+
+            {/* User status */}
+            <div className="border-t border-zinc-900 mt-1 pt-2 pb-1 px-3 text-[10px] text-zinc-500 flex flex-col gap-1 items-start text-left font-mono">
+              {user ? (
+                <>
+                  <span className="text-zinc-400 font-bold truncate max-w-full">👤 {user.displayName || 'کۆدکار'}</span>
+                  <span className="truncate max-w-full text-[9px]">{user.email}</span>
+                </>
+              ) : (
+                <span className="text-zinc-500 font-semibold italic">👤 مێوان (میھمان)</span>
+              )}
+            </div>
+          </div>
         )}
       </div>
 
@@ -3168,6 +3497,232 @@ const App: React.FC = () => {
         </div>
       )}
 
+      {/* Google Drive Modal */}
+      {showDriveModal && (
+        <div className="fixed inset-0 bg-black/95 z-[115] flex items-center justify-center p-4 backdrop-blur-md animate-in fade-in duration-200">
+          <div className="bg-zinc-950 border border-zinc-800 p-6 rounded-2xl w-full max-w-2xl shadow-2xl relative text-right flex flex-col max-h-[90vh]">
+            
+            {/* Modal Header */}
+            <div className="flex justify-between items-center border-b border-zinc-800 pb-4 mb-4" dir="rtl">
+              <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                <Icons.Drive className="text-amber-500" />
+                <span>گووگڵ درایڤ / Google Drive</span>
+              </h3>
+              <button 
+                onClick={() => setShowDriveModal(false)}
+                className="p-1.5 text-zinc-400 hover:text-white hover:bg-zinc-900 rounded-lg transition-all"
+              >
+                <Icons.X size={18} />
+              </button>
+            </div>
+
+            {/* If Google Drive is not connected yet */}
+            {!getGoogleAccessToken() ? (
+              <div className="flex flex-col items-center justify-center py-12 text-center" dir="rtl">
+                <div className="w-16 h-16 bg-amber-500/10 text-amber-500 rounded-2xl flex items-center justify-center mb-4">
+                  <Icons.Drive size={32} />
+                </div>
+                <h4 className="text-md font-bold text-white mb-2">بەستنەوە بە گووگڵ درایڤ</h4>
+                <p className="text-xs text-zinc-400 max-w-sm mb-6 leading-relaxed">
+                  بۆ بارکردن، دەستکاریکردن یان پاشەکەوتکردنی فایلەکانت ڕاستەوخۆ لە گووگڵ درایڤ، پێویستە سەرەتا مۆڵەت بەم ئەپە بدەیت.
+                </p>
+                
+                {driveError && (
+                  <div className="text-xs text-red-400 bg-red-950/40 border border-red-900/50 p-3 rounded-lg mb-4 max-w-md" dir="rtl">
+                    {driveError}
+                  </div>
+                )}
+
+                <button
+                  onClick={handleConnectDrive}
+                  disabled={isDriveLoading}
+                  className="px-6 py-2.5 bg-amber-600 hover:bg-amber-500 disabled:bg-zinc-800 text-white font-bold text-xs rounded-xl shadow-lg shadow-amber-900/30 transition-all flex items-center gap-2"
+                >
+                  {isDriveLoading ? (
+                    <>
+                      <Icons.Loader size={16} className="animate-spin" />
+                      <span>داواکردنی مۆڵەت...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Icons.Drive size={16} />
+                      <span>ڕێگەدان و پەیوەستکردن</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-4 overflow-hidden" dir="rtl">
+                {/* Save Current File Panel */}
+                <div className="bg-zinc-900/50 border border-zinc-800 p-4 rounded-xl flex flex-col gap-3">
+                  <span className="text-xs font-bold text-zinc-300 flex items-center gap-1.5">
+                    <Icons.Save size={14} className="text-indigo-400" />
+                    پاشەکەوتکردنی فایل لەسەر درایڤ (Save / Export to Drive)
+                  </span>
+                  
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <input
+                      type="text"
+                      placeholder="ناوی فایل بۆ پاشەکەوتکردن بنووسە..."
+                      value={saveDriveFilename}
+                      onChange={(e) => setSaveDriveFilename(e.target.value)}
+                      className="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500"
+                    />
+                    
+                    <div className="flex bg-zinc-950 border border-zinc-800 rounded-lg p-0.5">
+                      <button
+                        onClick={() => setSaveDriveType('pdf')}
+                        className={`px-3 py-1 text-[10px] font-bold rounded-md transition-all ${saveDriveType === 'pdf' ? 'bg-amber-600 text-white' : 'text-zinc-400 hover:text-white'}`}
+                      >
+                        PDF
+                      </button>
+                      <button
+                        onClick={() => setSaveDriveType('kpdf')}
+                        className={`px-3 py-1 text-[10px] font-bold rounded-md transition-all ${saveDriveType === 'kpdf' ? 'bg-indigo-600 text-white' : 'text-zinc-400 hover:text-white'}`}
+                      >
+                        KPDF (پڕۆژە)
+                      </button>
+                    </div>
+
+                    <button
+                      onClick={() => handleSaveToDrive(saveDriveFilename || saveTitle || "بێ_ناو", saveDriveType)}
+                      disabled={isSavingToDrive || pages.length === 0}
+                      className="px-4 py-1.5 bg-zinc-100 hover:bg-white disabled:bg-zinc-800 disabled:text-zinc-600 text-zinc-950 font-extrabold text-[11px] rounded-lg transition-all flex items-center gap-1.5 justify-center"
+                    >
+                      {isSavingToDrive ? (
+                        <>
+                          <Icons.Loader size={12} className="animate-spin" />
+                          <span>خەریکە دەنێردرێت...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Icons.Save size={12} />
+                          <span>پاشەکەوتکردن</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                  {pages.length === 0 && (
+                    <span className="text-[10px] text-zinc-500">هیچ لاپەڕەیەک نییە بۆ پاشەکەوتکردن. سەرەتا فایلێک بکەرەوە.</span>
+                  )}
+                </div>
+
+                {/* Search & List Header */}
+                <div className="flex flex-col sm:flex-row justify-between items-center gap-2 border-t border-zinc-800/60 pt-3">
+                  <div className="relative w-full sm:w-64">
+                    <input
+                      type="text"
+                      placeholder="گەڕان بەدوای فایلەکاندا..."
+                      value={driveSearch}
+                      onChange={(e) => setDriveSearch(e.target.value)}
+                      className="w-full bg-zinc-950 border border-zinc-800 rounded-lg pl-3 pr-8 py-1.5 text-xs text-white focus:outline-none focus:border-amber-500"
+                    />
+                    <button
+                      onClick={() => handleLoadDriveFiles(getGoogleAccessToken()!, driveSearch)}
+                      className="absolute right-2 top-1.5 text-zinc-400 hover:text-white"
+                    >
+                      <Icons.Globe size={14} />
+                    </button>
+                  </div>
+
+                  <div className="flex items-center gap-2 w-full sm:w-auto justify-between sm:justify-end">
+                    <span className="text-[10px] text-zinc-400">
+                      پەیوەستکراوە بە: <strong className="text-zinc-200">{auth.currentUser?.email || auth.currentUser?.displayName}</strong>
+                    </span>
+                    <button
+                      onClick={() => handleLoadDriveFiles(getGoogleAccessToken()!, driveSearch)}
+                      disabled={isDriveLoading}
+                      className="p-1.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 hover:text-white rounded-lg transition-colors"
+                      title="تازەکردنەوەی لیستی فایلەکان"
+                    >
+                      <Icons.Loader size={12} className={isDriveLoading ? "animate-spin" : ""} />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Drive Files List */}
+                <div className="flex-1 overflow-y-auto border border-zinc-800 rounded-xl bg-zinc-950 max-h-[40vh] min-h-[200px]">
+                  {isDriveLoading ? (
+                    <div className="flex flex-col items-center justify-center py-16 text-zinc-400 text-xs">
+                      <Icons.Loader size={24} className="animate-spin text-amber-500 mb-2" />
+                      داگرتنی فایلەکانی گووگڵ درایڤ...
+                    </div>
+                  ) : driveError ? (
+                    <div className="flex flex-col items-center justify-center py-16 text-center text-red-400 text-xs px-4">
+                      {driveError}
+                      <button
+                        onClick={() => handleLoadDriveFiles(getGoogleAccessToken()!, driveSearch)}
+                        className="mt-3 px-3 py-1 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-white rounded-lg"
+                      >
+                        دووبارە هەوڵبدەرەوە
+                      </button>
+                    </div>
+                  ) : driveFiles.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-16 text-zinc-500 text-xs">
+                      هیچ فایلێکی گونجاو (PDF یان KPDF) نەدۆزرایەوە لە درایڤەکەتدا.
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-zinc-900">
+                      {driveFiles.map((file) => {
+                        const isKpdf = file.name.endsWith('.kpdf') || file.name.endsWith('.json') || file.mimeType === 'application/json';
+                        return (
+                          <div key={file.id} className="p-3 hover:bg-zinc-900/40 flex items-center justify-between transition-all">
+                            <div className="flex items-center gap-3">
+                              <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${isKpdf ? 'bg-indigo-500/10 text-indigo-400' : 'bg-red-500/10 text-red-400'}`}>
+                                {isKpdf ? <Icons.Save size={16} /> : <Icons.File size={16} />}
+                              </div>
+                              <div className="text-right">
+                                <h4 className="text-xs font-bold text-white leading-tight">{file.name}</h4>
+                                <span className="text-[9px] text-zinc-500 font-mono">
+                                  {file.size ? `${(Number(file.size) / 1024 / 1024).toFixed(2)} MB` : 'نەزانراو'} • {file.modifiedTime ? new Date(file.modifiedTime).toLocaleDateString() : ''}
+                                </span>
+                              </div>
+                            </div>
+
+                            <button
+                              onClick={() => handleOpenDriveFile(file)}
+                              className="px-3 py-1 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-white font-bold text-[10px] rounded-md transition-all"
+                            >
+                              کردنەوە (Open)
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex justify-between items-center mt-2 text-[10px] text-zinc-500">
+                  <span>دەتوانیت گەڕان بکەیت بەدوای فایلی کەیفی</span>
+                  <button 
+                    onClick={() => {
+                      setGoogleAccessToken(null);
+                      setDriveFiles([]);
+                    }}
+                    className="text-red-400 hover:text-red-300 transition-colors"
+                  >
+                    پچڕاندنی پەیوەندی (Disconnect)
+                  </button>
+                </div>
+
+              </div>
+            )}
+
+            {/* Modal Footer */}
+            <div className="flex justify-between items-center mt-5 border-t border-zinc-800 pt-4" dir="rtl">
+              <span className="text-[10px] text-zinc-500 font-mono">Google Workspace Integration</span>
+              <button 
+                onClick={() => setShowDriveModal(false)} 
+                className="px-4 py-1.5 text-xs font-bold bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-white rounded-lg transition-colors"
+              >
+                داخستن
+              </button>
+            </div>
+
+          </div>
+        </div>
+      )}
+
       {/* Floating Toolbar */}
       <Toolbar 
         editorState={editorState}
@@ -3195,6 +3750,13 @@ const App: React.FC = () => {
         onAddMathSymbol={handleAddMathSymbolToCanvas}
         onAIParseMath={handleAIParseMath}
         onTroubleshootPage={handleTroubleshootPage}
+        onOpenDrive={() => {
+          setShowDriveModal(true);
+          const token = getGoogleAccessToken();
+          if (token) {
+            handleLoadDriveFiles(token);
+          }
+        }}
       />
 
       <div className="relative flex flex-1 overflow-hidden flex-col md:flex-row pt-24 md:pt-0">

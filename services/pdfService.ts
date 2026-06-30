@@ -27,11 +27,11 @@ export const renderPDFPageToDataURL = async (pdfDoc: any, pageNumber: number, sc
   };
 };
 
-export const loadPDFDocument = async (file: File) => {
+export const loadPDFDocument = async (file: File | ArrayBuffer) => {
   if (!window.pdfjsLib) {
     throw new Error("PDF.js library is not loaded. Please ensure script tags are present in index.html");
   }
-  const arrayBuffer = await file.arrayBuffer();
+  const arrayBuffer = file instanceof ArrayBuffer ? file : await file.arrayBuffer();
   // @ts-ignore
   const loadingTask = window.pdfjsLib.getDocument(arrayBuffer);
   return loadingTask.promise;

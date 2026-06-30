@@ -43,6 +43,20 @@ const app = initializeApp(firebaseConfig);
 // Initialize Authentication
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
+googleProvider.addScope('https://www.googleapis.com/auth/drive');
+googleProvider.addScope('https://www.googleapis.com/auth/drive.file');
+googleProvider.addScope('https://www.googleapis.com/auth/drive.metadata.readonly');
+
+// In-memory access token cache for Google APIs
+let cachedAccessToken: string | null = null;
+
+export function getGoogleAccessToken() {
+  return cachedAccessToken;
+}
+
+export function setGoogleAccessToken(token: string | null) {
+  cachedAccessToken = token;
+}
 
 // Initialize Firestore (with databaseId specified)
 // Standard Firestore uses '(default)' database which should not be passed to getFirestore
@@ -120,6 +134,8 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
 export async function signInWithGoogle() {
   try {
     const result = await signInWithPopup(auth, googleProvider);
+    const credential = GoogleAuthProvider.credentialFromResult(result);
+    cachedAccessToken = credential?.accessToken || null;
     return result.user;
   } catch (error) {
     console.error("Google sign-in failed:", error);
