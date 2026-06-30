@@ -29,7 +29,6 @@ interface ToolbarProps {
   onAddMathSymbol: (type: string) => void;
   onAIParseMath?: (file: File, instruction: string) => Promise<void>;
   onTroubleshootPage?: (instruction: string) => Promise<void>;
-  onOpenDrive: () => void;
 }
 
 const ToolButton: React.FC<{
@@ -83,8 +82,7 @@ const Toolbar: React.FC<ToolbarProps> = ({
   onAddElement,
   onAddMathSymbol,
   onAIParseMath,
-  onTroubleshootPage,
-  onOpenDrive
+  onTroubleshootPage
 }) => {
   const [showElementsDropdown, setShowElementsDropdown] = React.useState(false);
   const [showMathDropdown, setShowMathDropdown] = React.useState(false);
@@ -187,15 +185,6 @@ const Toolbar: React.FC<ToolbarProps> = ({
             >
               <Icons.Save size={auxSize} className="text-indigo-200" />
               <span className="text-[10px] font-extrabold text-indigo-100">خەزنکرنا پڕۆژەی (.kpdf)</span>
-            </button>
-
-            <button 
-              onClick={onOpenDrive} 
-              className="p-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded-lg transition-colors flex items-center gap-1 shadow-[0_0_10px_rgba(217,119,6,0.3)]" 
-              title="گووگڵ درایڤ (Google Drive Import/Export)"
-            >
-              <Icons.Drive size={auxSize} className="text-amber-100" />
-              <span className="text-[10px] font-extrabold text-amber-100">گووگڵ درایڤ</span>
             </button>
             
             <button onClick={onAddPage} className="p-1.5 bg-gray-700/80 hover:bg-gray-600 text-white rounded-lg transition-colors" title="لاپەرێ سپی">

@@ -2004,7 +2004,6 @@ const PageEditor: React.FC<PageEditorProps> = ({
     canvas.on('object:scaling', handleObjectScaling);
     canvas.on('object:removed', onModified);
     canvas.on('path:created', onModified);
-    canvas.on('text:changed', onModified);
 
     // Handle double click on any object to enter editing mode immediately, or on background to zoom
     canvas.on('mouse:dblclick', (opt: any) => {

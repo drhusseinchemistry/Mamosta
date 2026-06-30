@@ -66,15 +66,10 @@ import {
   Edit,
   Code,
   Check,
-  LineChart,
-  Send,
-  HardDrive,
-  Menu
+  LineChart
 } from 'lucide-react';
 
 export const Icons = {
-  Send: Send,
-  Menu: Menu,
   LineChart: LineChart,
   Check: Check,
   Edit: Edit,
@@ -114,7 +109,6 @@ export const Icons = {
   TableIcon: TableIcon,
   Diamond: Diamond,
   ArrowRight: ArrowRight,
-  Drive: HardDrive,
   
   // Text Formatting and Styling Icons
   Bold: Bold,

@@ -712,7 +712,7 @@ CRITICAL GOALS & RULES:
 
 CRITICAL: Return ONLY valid, minified JSON matching the original .kpdf JSON format. Do NOT wrap it in markdown codeblocks (no \`\`\`json ... \`\`\`), do NOT write any introductory or conversational text. Return only the JSON string starting with { and ending with }.`;
 
-    const modelToUse = activeModel || "gemini-3.5-flash";
+    const activeModel = await getActiveModel();
     const parts: any[] = [
       { text: systemPrompt }, 
       { text: `Original .kpdf Project JSON:\n${typeof kpdf === 'string' ? kpdf : JSON.stringify(kpdf)}` }
@@ -727,7 +727,7 @@ CRITICAL: Return ONLY valid, minified JSON matching the original .kpdf JSON form
     }
 
     const response = await ai.models.generateContent({
-      model: modelToUse,
+      model: activeModel,
       contents: {
         parts: parts
       },

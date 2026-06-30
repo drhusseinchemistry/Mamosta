@@ -17,31 +17,72 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == userId;
     }
 
-    function isAdmin() {
-      return isSignedIn() && request.auth.token.email_verified == true && request.auth.token.email == 'hussein.zebary.chemistry96@gmail.com';
-    }
-
     function isValidId(id) {
       return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- Project Entity Validation ---
+    function isValidProject(data) {
+      return data.keys().hasAll(['title', 'userId', 'pages', 'canvases', 'createdAt', 'updatedAt'])
+        && data.keys().size() <= 10
+        && data.title is string
+        && data.title.size() > 0
+        && data.title.size() <= 200
+        && data.userId is string
+        && data.userId == request.auth.uid
+        && data.pages is list
+        && data.pages.size() <= 100
+        && data.canvases is map;
+    }
+
+    // --- User Settings Entity Validation ---
+    function isValidUserSettings(data) {
+      return data.keys().hasAll(['userId', 'theme', 'updatedAt'])
+        && data.keys().size() <= 6
+        && data.userId is string
+        && data.userId == request.auth.uid
+        && data.theme is string
+        && data.theme.size() <= 50;
     }
 
     // --- Collection Matches ---
 
     // /projects/{projectId}
     match /projects/{projectId} {
-      allow get: if isSignedIn() && isValidId(projectId);
-      allow list: if isSignedIn();
+      allow get: if isSignedIn() && isOwner(existing().userId) && isValidId(projectId);
+      
+      // Query enforcement: client must filter by userId
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
       
       allow create: if isSignedIn() 
         && isValidId(projectId)
-        && (request.resource.data.userId == request.auth.uid || isAdmin());
+        && isValidProject(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
         
       allow update: if isSignedIn()
         && isValidId(projectId)
-        && (isAdmin() || resource.data.userId == request.auth.uid);
+        && isValidProject(incoming())
+        && isOwner(existing().userId)
+        // Ensure immutable creator and creation time
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        // Action: Rename or edit content
+        && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['title', 'pages', 'canvases', 'updatedAt'])
+        );
         
       allow delete: if isSignedIn() 
-        && (resource.data.userId == request.auth.uid || isAdmin())
+        && isOwner(existing().userId)
         && isValidId(projectId);
     }
 
@@ -52,11 +93,19 @@ service cloud.firestore {
       
       allow create: if isSignedIn()
         && isOwner(userId)
-        && isValidId(userId);
+        && isValidId(userId)
+        && isValidUserSettings(incoming())
+        && incoming().updatedAt == request.time;
         
       allow update: if isSignedIn()
         && isOwner(userId)
-        && isValidId(userId);
+        && isValidId(userId)
+        && isValidUserSettings(incoming())
+        && incoming().userId == existing().userId
+        && incoming().updatedAt == request.time
+        && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['theme', 'iconSize', 'listMarker', 'updatedAt'])
+        );
         
       allow delete: if isSignedIn() 
         && isOwner(userId)
