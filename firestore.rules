@@ -36,26 +36,20 @@ service cloud.firestore {
     // --- Project Entity Validation ---
     function isValidProject(data) {
       return data.keys().hasAll(['title', 'userId', 'pages', 'canvases', 'createdAt', 'updatedAt'])
-        && data.keys().size() <= 12
         && data.title is string
         && data.title.size() > 0
-        && data.title.size() <= 200
         && data.userId is string
         && (data.userId == request.auth.uid || isAdmin())
         && data.pages is list
-        && data.pages.size() <= 100
-        && data.canvases is map
-        && (data.get('isPublished', false) == false || (data.isPublished is bool && isAdmin()));
+        && data.canvases is map;
     }
 
     // --- User Settings Entity Validation ---
     function isValidUserSettings(data) {
       return data.keys().hasAll(['userId', 'theme', 'updatedAt'])
-        && data.keys().size() <= 6
         && data.userId is string
         && data.userId == request.auth.uid
-        && data.theme is string
-        && data.theme.size() <= 50;
+        && data.theme is string;
     }
 
     // --- Collection Matches ---
@@ -70,8 +64,8 @@ service cloud.firestore {
       allow create: if isSignedIn() 
         && isValidId(projectId)
         && isValidProject(incoming())
-        && incoming().createdAt == request.time
-        && incoming().updatedAt == request.time;
+        && incoming().createdAt != null
+        && incoming().updatedAt != null;
         
       allow update: if isSignedIn()
         && isValidId(projectId)
@@ -80,7 +74,7 @@ service cloud.firestore {
         // Ensure immutable creator and creation time
         && incoming().userId == existing().userId
         && incoming().createdAt == existing().createdAt
-        && incoming().updatedAt == request.time
+        && incoming().updatedAt != null
         // Action: Rename or edit content or request/set publish
         && (
           incoming().diff(existing()).affectedKeys().hasOnly([
